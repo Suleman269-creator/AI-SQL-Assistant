@@ -7,7 +7,6 @@ from fastapi import (
 )
 
 from fastapi.middleware.cors import CORSMiddleware
-
 from sqlalchemy.orm import Session
 
 import os
@@ -50,11 +49,13 @@ from app.models.dataset import DatasetMetadata
 # ============================================================
 # SCHEMAS
 # ============================================================
+
 from app.schemas.queries import (
     QueryCreate,
     SQLResponse,
     AskRequest
 )
+
 
 # ============================================================
 # DATASET SERVICE
@@ -77,6 +78,15 @@ from app.services.dataset_service import (
 from app.services.gemini_service import (
     generate_response,
     generate_sql_from_question
+)
+
+
+# ============================================================
+# INSIGHT SERVICE
+# ============================================================
+
+from app.services.insight_service import (
+    generate_insight
 )
 
 
@@ -148,8 +158,7 @@ app.add_middleware(
 async def root():
 
     return {
-        "message":
-            "Welcome to the AI SQL Assistant API!"
+        "message": "Welcome to the AI SQL Assistant API!"
     }
 
 
@@ -161,11 +170,8 @@ async def root():
 async def health_check():
 
     return {
-        "status":
-            "healthy",
-
-        "message":
-            "The API is running smoothly."
+        "status": "healthy",
+        "message": "The API is running smoothly."
     }
 
 
@@ -180,7 +186,7 @@ async def get_dataset_info(
 ):
 
     # --------------------------------------------------------
-    # Find dataset metadata
+    # Find dataset
     # --------------------------------------------------------
 
     dataset = get_dataset_by_id(
@@ -196,7 +202,7 @@ async def get_dataset_info(
         )
 
     # --------------------------------------------------------
-    # Check actual SQL table
+    # Check table
     # --------------------------------------------------------
 
     table_exists = check_table_exists(
@@ -212,7 +218,7 @@ async def get_dataset_info(
         )
 
     # --------------------------------------------------------
-    # Get actual row count
+    # Get row count
     # --------------------------------------------------------
 
     row_count = get_table_row_count(
@@ -221,7 +227,7 @@ async def get_dataset_info(
     )
 
     # --------------------------------------------------------
-    # Get actual columns
+    # Get columns
     # --------------------------------------------------------
 
     columns = get_table_columns(
@@ -230,13 +236,12 @@ async def get_dataset_info(
     )
 
     # --------------------------------------------------------
-    # Return dataset information
+    # Return
     # --------------------------------------------------------
 
     return {
 
-        "success":
-            True,
+        "success": True,
 
         "dataset_id":
             dataset.dataset_id,
@@ -272,7 +277,7 @@ async def dataset_preview(
 ):
 
     # --------------------------------------------------------
-    # Find dataset metadata
+    # Find dataset
     # --------------------------------------------------------
 
     dataset = get_dataset_by_id(
@@ -288,7 +293,7 @@ async def dataset_preview(
         )
 
     # --------------------------------------------------------
-    # Check actual SQL table
+    # Check table
     # --------------------------------------------------------
 
     table_exists = check_table_exists(
@@ -314,16 +319,15 @@ async def dataset_preview(
     )
 
     # --------------------------------------------------------
-    # Return preview
+    # Return
     # --------------------------------------------------------
 
     return {
 
-        "success":
-            True,
+        "success": True,
 
         "dataset_id":
-            dataset.dataset_id,
+            dataset_id,
 
         "table_name":
             dataset.table_name,
@@ -347,7 +351,9 @@ def create_query(
 ):
 
     new_query = QueryHistory(
+
         question=query.question,
+
         generated_sql=query.generated_sql
     )
 
@@ -381,14 +387,67 @@ def create_query(
 @app.get("/test-gemini")
 async def test_gemini():
 
-    response = generate_response(
-        "Explain SQL in one sentence."
-    )
+    try:
 
-    return {
-        "response":
-            response
-    }
+        response = generate_response(
+            "Explain SQL in one sentence."
+        )
+
+        return {
+
+            "success": True,
+
+            "response":
+                response
+        }
+
+    except Exception as error:
+
+        error_message = str(error)
+
+        # ----------------------------------------------------
+        # Gemini quota error
+        # ----------------------------------------------------
+
+        if (
+            "429" in error_message
+            or "RESOURCE_EXHAUSTED" in error_message
+        ):
+
+            raise HTTPException(
+
+                status_code=429,
+
+                detail={
+
+                    "message":
+                        "Gemini API quota has been exceeded.",
+
+                    "error":
+                        error_message,
+
+                    "suggestion":
+                        "Wait for the quota to reset or use another API key/model."
+                }
+            )
+
+        # ----------------------------------------------------
+        # Other error
+        # ----------------------------------------------------
+
+        raise HTTPException(
+
+            status_code=500,
+
+            detail={
+
+                "message":
+                    "Gemini request failed.",
+
+                "error":
+                    error_message
+            }
+        )
 
 
 # ============================================================
@@ -400,15 +459,10 @@ async def generate_sql_query(
     request: SQLResponse
 ):
 
-    # --------------------------------------------------------
-    # NOTE:
-    # This endpoint is kept for basic SQL generation testing.
-    #
-    # The real dataset-aware AI pipeline is /ask.
-    # --------------------------------------------------------
-
     raise HTTPException(
+
         status_code=501,
+
         detail=(
             "Use the /ask endpoint for "
             "dataset-aware SQL generation."
@@ -427,7 +481,7 @@ async def upload_data(
 ):
 
     # --------------------------------------------------------
-    # Validate file
+    # Validate filename
     # --------------------------------------------------------
 
     if not file.filename:
@@ -453,6 +507,7 @@ async def upload_data(
     if file_extension not in allowed_extensions:
 
         raise HTTPException(
+
             status_code=400,
 
             detail=(
@@ -461,13 +516,13 @@ async def upload_data(
             )
         )
 
-    # --------------------------------------------------------
-    # Create temporary file
-    # --------------------------------------------------------
-
     temp_file = None
 
     try:
+
+        # ----------------------------------------------------
+        # Create temporary file
+        # ----------------------------------------------------
 
         with tempfile.NamedTemporaryFile(
             delete=False,
@@ -482,7 +537,7 @@ async def upload_data(
             )
 
         # ----------------------------------------------------
-        # Run complete ETL pipeline
+        # Run ETL
         # ----------------------------------------------------
 
         df, report = run_etl_pipeline(
@@ -495,7 +550,7 @@ async def upload_data(
         )
 
         # ----------------------------------------------------
-        # Generate unique dataset ID
+        # Generate dataset ID
         # ----------------------------------------------------
 
         dataset_id = (
@@ -503,7 +558,7 @@ async def upload_data(
         )
 
         # ----------------------------------------------------
-        # Generate SQL table name
+        # Generate table name
         # ----------------------------------------------------
 
         table_name = generate_table_name(
@@ -526,12 +581,7 @@ async def upload_data(
         )
 
         # ----------------------------------------------------
-        # Create dynamic SQL table
-        #
-        # IMPORTANT:
-        # create_dataset_table() already uses df.to_sql()
-        # and therefore inserts the DataFrame into the table.
-        # We do NOT need insert_dataset() separately.
+        # Create SQL table
         # ----------------------------------------------------
 
         create_dataset_table(
@@ -545,7 +595,7 @@ async def upload_data(
         )
 
         # ----------------------------------------------------
-        # Store column metadata
+        # Column metadata
         # ----------------------------------------------------
 
         column_metadata = []
@@ -562,28 +612,24 @@ async def upload_data(
             })
 
         # ----------------------------------------------------
-        # Create DatasetMetadata record
+        # Dataset metadata
         # ----------------------------------------------------
 
         dataset_metadata = DatasetMetadata(
 
-            dataset_id=
-                dataset_id,
+            dataset_id=dataset_id,
 
-            filename=
-                file.filename,
+            filename=file.filename,
 
-            table_name=
-                table_name,
+            table_name=table_name,
 
-            row_count=
-                len(df),
+            row_count=len(df),
 
-            column_count=
-                len(df.columns),
+            column_count=len(df.columns),
 
-            columns=
-                json.dumps(column_metadata)
+            columns=json.dumps(
+                column_metadata
+            )
         )
 
         db.add(
@@ -597,7 +643,7 @@ async def upload_data(
         )
 
         # ----------------------------------------------------
-        # Create preview
+        # Preview
         # ----------------------------------------------------
 
         preview_df = (
@@ -618,7 +664,7 @@ async def upload_data(
         )
 
         # ----------------------------------------------------
-        # Dataset information
+        # Dataset info
         # ----------------------------------------------------
 
         dataset_info = {
@@ -637,7 +683,7 @@ async def upload_data(
         }
 
         # ----------------------------------------------------
-        # Return response
+        # Return
         # ----------------------------------------------------
 
         return {
@@ -722,7 +768,9 @@ async def upload_data(
     except FileNotFoundError as error:
 
         raise HTTPException(
+
             status_code=404,
+
             detail=str(error)
         )
 
@@ -734,6 +782,7 @@ async def upload_data(
         )
 
         raise HTTPException(
+
             status_code=500,
 
             detail={
@@ -747,10 +796,6 @@ async def upload_data(
         )
 
     finally:
-
-        # ----------------------------------------------------
-        # Delete temporary file
-        # ----------------------------------------------------
 
         if (
             temp_file
@@ -771,15 +816,6 @@ async def clean_data(
     file: UploadFile = File(...)
 ):
 
-    """
-    Runs the ETL pipeline without
-    creating a SQL dataset table.
-    """
-
-    # --------------------------------------------------------
-    # Validate file
-    # --------------------------------------------------------
-
     if not file.filename:
 
         raise HTTPException(
@@ -799,6 +835,7 @@ async def clean_data(
     if file_extension not in allowed_extensions:
 
         raise HTTPException(
+
             status_code=400,
 
             detail=(
@@ -812,7 +849,7 @@ async def clean_data(
     try:
 
         # ----------------------------------------------------
-        # Save temporary uploaded file
+        # Temporary file
         # ----------------------------------------------------
 
         with tempfile.NamedTemporaryFile(
@@ -828,7 +865,7 @@ async def clean_data(
             )
 
         # ----------------------------------------------------
-        # Run ETL
+        # ETL
         # ----------------------------------------------------
 
         df, report = run_etl_pipeline(
@@ -836,7 +873,7 @@ async def clean_data(
         )
 
         # ----------------------------------------------------
-        # Preview cleaned dataset
+        # Preview
         # ----------------------------------------------------
 
         preview_df = (
@@ -857,7 +894,7 @@ async def clean_data(
         )
 
         # ----------------------------------------------------
-        # Return cleaning result
+        # Return
         # ----------------------------------------------------
 
         return {
@@ -940,7 +977,13 @@ async def clean_data(
 
     except Exception as error:
 
+        print(
+            "CLEAN DATA ERROR:",
+            str(error)
+        )
+
         raise HTTPException(
+
             status_code=500,
 
             detail={
@@ -976,31 +1019,38 @@ async def ask_ai(
 ):
 
     dataset_id = request.dataset_id
-    question = request.question
 
-    # --------------------------------------------------------
-    # Validate dataset_id
-    # --------------------------------------------------------
+    question = (
+        request.question.strip()
+        if request.question
+        else ""
+    )
+
+    # ========================================================
+    # VALIDATION
+    # ========================================================
 
     if not dataset_id:
+
         raise HTTPException(
+
             status_code=400,
+
             detail="dataset_id is required."
         )
 
-    # --------------------------------------------------------
-    # Validate question
-    # --------------------------------------------------------
-
     if not question:
+
         raise HTTPException(
+
             status_code=400,
+
             detail="question is required."
         )
 
-    # --------------------------------------------------------
-    # Find dataset metadata
-    # --------------------------------------------------------
+    # ========================================================
+    # GET DATASET
+    # ========================================================
 
     dataset = get_dataset_by_id(
         db,
@@ -1008,69 +1058,171 @@ async def ask_ai(
     )
 
     if not dataset:
+
         raise HTTPException(
+
             status_code=404,
+
             detail="Dataset not found."
         )
 
-    # --------------------------------------------------------
-    # Check actual SQL table
-    # --------------------------------------------------------
+    # ========================================================
+    # CHECK TABLE
+    # ========================================================
 
     table_exists = check_table_exists(
+
         engine,
+
         dataset.table_name
     )
 
     if not table_exists:
+
         raise HTTPException(
+
             status_code=404,
+
             detail="Dataset SQL table does not exist."
         )
 
-    # --------------------------------------------------------
-    # Get dataset schema
-    # --------------------------------------------------------
+    # ========================================================
+    # GET SCHEMA
+    # ========================================================
 
     schema_context = get_dataset_schema_context(
+
         engine,
+
         dataset.table_name
     )
 
-    # --------------------------------------------------------
-    # Generate SQL using Gemini
-    # --------------------------------------------------------
+    # ========================================================
+    # GENERATE SQL WITH GEMINI
+    # ========================================================
 
-    generated_sql = generate_sql_from_question(
-        question,
-        dataset.table_name,
-        schema_context
-    )
+    try:
 
-    print(
-        "DEBUG generated SQL:",
-        generated_sql
-    )
+        generated_sql = generate_sql_from_question(
 
-    # --------------------------------------------------------
-    # Execute SQL safely
-    # --------------------------------------------------------
+            question=question,
 
-    result = execute_sql(
-        engine,
-        generated_sql
-    )
+            table_name=dataset.table_name,
 
-    # --------------------------------------------------------
-    # Check SQL execution
-    # --------------------------------------------------------
+            schema_context=schema_context
+        )
+
+        print(
+            "DEBUG generated SQL:",
+            generated_sql
+        )
+
+    except Exception as error:
+
+        error_message = str(error)
+
+        print(
+            "SQL GENERATION ERROR:",
+            error_message
+        )
+
+        # ----------------------------------------------------
+        # Gemini quota exceeded
+        # ----------------------------------------------------
+
+        if (
+            "429" in error_message
+            or "RESOURCE_EXHAUSTED" in error_message
+            or "quota" in error_message.lower()
+        ):
+
+            raise HTTPException(
+
+                status_code=429,
+
+                detail={
+
+                    "message":
+                        "Gemini API quota has been exceeded.",
+
+                    "error":
+                        "Gemini free-tier request quota is exhausted.",
+
+                    "suggestion":
+                        (
+                            "Wait for the quota to reset, "
+                            "use another API key, or configure "
+                            "a different Gemini model."
+                        )
+                }
+            )
+
+        # ----------------------------------------------------
+        # Other Gemini error
+        # ----------------------------------------------------
+
+        raise HTTPException(
+
+            status_code=500,
+
+            detail={
+
+                "message":
+                    "AI failed to generate SQL.",
+
+                "error":
+                    error_message
+            }
+        )
+
+    # ========================================================
+    # EXECUTE SQL
+    # ========================================================
+
+    try:
+
+        result = execute_sql(
+
+            engine,
+
+            generated_sql,
+
+            allowed_table=dataset.table_name
+        )
+
+    except Exception as error:
+
+        print(
+            "SQL SERVICE ERROR:",
+            str(error)
+        )
+
+        raise HTTPException(
+
+            status_code=500,
+
+            detail={
+
+                "message":
+                    "SQL execution service failed.",
+
+                "error":
+                    str(error)
+            }
+        )
+
+    # ========================================================
+    # SQL EXECUTION ERROR
+    # ========================================================
 
     if not result["success"]:
 
         raise HTTPException(
+
             status_code=400,
 
             detail={
+
                 "message":
                     "SQL execution failed.",
 
@@ -1079,37 +1231,95 @@ async def ask_ai(
             }
         )
 
-    # --------------------------------------------------------
-    # SAVE QUERY HISTORY
-    # --------------------------------------------------------
+    # ========================================================
+    # GENERATE DETERMINISTIC INSIGHT
+    #
+    # IMPORTANT:
+    # generate_insight() MUST NOT call Gemini.
+    # ========================================================
 
-    query_history = QueryHistory(
+    try:
 
-        dataset_id=dataset_id,
+        insight = generate_insight(
 
-        user_question=question,
+            question=question,
 
-        generated_sql=generated_sql
-    )
+            result=result
+        )
 
-    db.add(
-        query_history
-    )
+    except Exception as error:
 
-    db.commit()
+        print(
+            "INSIGHT ERROR:",
+            str(error)
+        )
 
-    db.refresh(
-        query_history
-    )
+        insight = (
+            "The query executed successfully, "
+            "but an insight could not be generated."
+        )
 
     print(
-        "DEBUG query history saved:",
-        query_history.id
+        "DEBUG insight:",
+        insight
     )
 
-    # --------------------------------------------------------
-    # Return AI SQL result
-    # --------------------------------------------------------
+    # ========================================================
+    # SAVE QUERY HISTORY
+    # ========================================================
+
+    try:
+
+        query_history = QueryHistory(
+
+            dataset_id=dataset_id,
+
+            user_question=question,
+
+            generated_sql=generated_sql
+        )
+
+        db.add(
+            query_history
+        )
+
+        db.commit()
+
+        db.refresh(
+            query_history
+        )
+
+        print(
+            "DEBUG query history saved:",
+            query_history.id
+        )
+
+    except Exception as error:
+
+        db.rollback()
+
+        print(
+            "QUERY HISTORY ERROR:",
+            str(error)
+        )
+
+        raise HTTPException(
+
+            status_code=500,
+
+            detail={
+
+                "message":
+                    "Query executed but history could not be saved.",
+
+                "error":
+                    str(error)
+            }
+        )
+
+    # ========================================================
+    # RETURN RESULT
+    # ========================================================
 
     return {
 
@@ -1137,11 +1347,14 @@ async def ask_ai(
                 result["row_count"]
         },
 
+        "insight":
+            insight,
+
         "query_history_id":
             query_history.id
     }
-    
-    
+
+
 # ============================================================
 # QUERY HISTORY
 # ============================================================
@@ -1152,40 +1365,48 @@ async def get_query_history(
     db: Session = Depends(get_db)
 ):
 
-    # --------------------------------------------------------
-    # Validate dataset
-    # --------------------------------------------------------
+    # ========================================================
+    # VALIDATE DATASET
+    # ========================================================
 
     dataset = get_dataset_by_id(
+
         db,
+
         dataset_id
     )
 
     if not dataset:
 
         raise HTTPException(
+
             status_code=404,
+
             detail="Dataset not found."
         )
 
-    # --------------------------------------------------------
-    # Get query history for this dataset
-    # --------------------------------------------------------
+    # ========================================================
+    # GET HISTORY
+    # ========================================================
 
     history = (
+
         db.query(QueryHistory)
+
         .filter(
             QueryHistory.dataset_id == dataset_id
         )
+
         .order_by(
             QueryHistory.created_at.desc()
         )
+
         .all()
     )
 
-    # --------------------------------------------------------
-    # Format history
-    # --------------------------------------------------------
+    # ========================================================
+    # FORMAT HISTORY
+    # ========================================================
 
     history_data = []
 
@@ -1206,9 +1427,9 @@ async def get_query_history(
                 item.created_at
         })
 
-    # --------------------------------------------------------
-    # Return history
-    # --------------------------------------------------------
+    # ========================================================
+    # RETURN HISTORY
+    # ========================================================
 
     return {
 

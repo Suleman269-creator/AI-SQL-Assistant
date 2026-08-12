@@ -1,113 +1,471 @@
+import re
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
 import pandas as pd
 
 
-def safe_value(value):
-    """Convert pandas/numpy values into JSON-safe Python values."""
-    if pd.isna(value):
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+DEFAULT_TOLERANCE = 1.0
+
+DATE_KEYWORDS = [
+    "date",
+    "datetime",
+    "timestamp",
+    "created_at",
+    "updated_at",
+    "modified_at",
+    "ordered_at",
+    "order_date",
+    "purchase_date",
+    "transaction_date",
+    "dob",
+    "birth_date",
+]
+
+# Columns where changing capitalization can be dangerous.
+PROTECTED_TEXT_KEYWORDS = [
+    "email",
+    "e_mail",
+    "url",
+    "website",
+    "phone",
+    "mobile",
+    "telephone",
+    "password",
+    "username",
+    "user_name",
+    "customer_id",
+    "client_id",
+    "employee_id",
+    "student_id",
+    "product_id",
+    "order_id",
+    "transaction_id",
+    "invoice_id",
+    "id",
+    "code",
+    "sku",
+    "zip",
+    "postal",
+]
+
+
+# ============================================================
+# SAFE VALUE
+# ============================================================
+
+def safe_value(value: Any) -> Any:
+    """
+    Convert pandas/numpy values into JSON-safe Python values.
+    """
+
+    if value is None:
         return None
 
-    if hasattr(value, "item"):
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+
+    if isinstance(value, np.generic):
         value = value.item()
+
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+
+    if isinstance(value, (np.ndarray, list, tuple)):
+        return [
+            safe_value(item)
+            for item in value
+        ]
+
+    if isinstance(value, dict):
+        return {
+            str(key): safe_value(val)
+            for key, val in value.items()
+        }
 
     return value
 
 
 # ============================================================
-# 1. TEXT CLEANING
+# SAFE COLUMN NAME NORMALIZATION
 # ============================================================
 
-def clean_text_values(df):
+def normalize_column_name(column: Any) -> str:
+    """
+    Convert arbitrary column names into safe snake_case names.
+
+    Examples:
+        "Order ID"       -> "order_id"
+        "Customer-Name"  -> "customer_name"
+        "Total Sales ($)" -> "total_sales"
+    """
+
+    column = str(column).strip().lower()
+
+    # Replace special characters with spaces.
+    column = re.sub(r"[^a-z0-9]+", "_", column)
+
+    # Remove duplicate underscores.
+    column = re.sub(r"_+", "_", column)
+
+    # Remove leading/trailing underscores.
+    column = column.strip("_")
+
+    return column or "unnamed_column"
+
+
+def make_unique_columns(columns) -> List[str]:
+    """
+    Ensure duplicate normalized column names remain unique.
+    """
+
+    result = []
+    counts = {}
+
+    for column in columns:
+
+        base = normalize_column_name(column)
+
+        if base not in counts:
+            counts[base] = 0
+            result.append(base)
+        else:
+            counts[base] += 1
+            result.append(
+                f"{base}_{counts[base]}"
+            )
+
+    return result
+
+
+# ============================================================
+# TEXT CLEANING
+# ============================================================
+
+def clean_text_values(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Clean whitespace in text columns.
+
+    Does NOT change capitalization.
+    """
+
     df = df.copy()
 
     text_columns = df.select_dtypes(
-        include="object"
+        include=["object", "string"]
     ).columns
 
     for column in text_columns:
+
         df[column] = df[column].apply(
-            lambda value: " ".join(value.split())
-            if isinstance(value, str)
-            else value
+            lambda value: (
+                re.sub(
+                    r"\s+",
+                    " ",
+                    value
+                ).strip()
+                if isinstance(value, str)
+                else value
+            )
         )
 
     return df
 
 
 # ============================================================
-# 2. BASIC DATA CLEANING
+# BASIC DATA CLEANING
 # ============================================================
 
-def clean_basic_data(df):
+def clean_basic_data(
+    df: pd.DataFrame
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """
+    Perform safe, dataset-independent cleaning.
+
+    This function does NOT assume that the dataset is:
+        - sales data
+        - customer data
+        - HR data
+        - finance data
+        - etc.
+
+    It only performs universally safe operations.
+    """
+
+    if df is None:
+        raise ValueError("Input dataframe cannot be None.")
+
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError(
+            "clean_basic_data() expects a pandas DataFrame."
+        )
+
     df = df.copy()
 
-    # --------------------------------------------------
-    # Clean column names
-    # --------------------------------------------------
+    original_rows = len(df)
+    original_columns = len(df.columns)
 
-    df.columns = (
-        df.columns
-        .str.strip()
-        .str.lower()
-        .str.replace(" ", "_", regex=False)
-        .str.replace("-", "_", regex=False)
+    # --------------------------------------------------------
+    # Column names
+    # --------------------------------------------------------
+
+    original_column_names = list(df.columns)
+
+    normalized_columns = make_unique_columns(
+        original_column_names
     )
 
-    # --------------------------------------------------
+    df.columns = normalized_columns
+
+    # --------------------------------------------------------
     # Remove completely empty columns
-    # --------------------------------------------------
+    # --------------------------------------------------------
 
-    df = df.dropna(
-        axis=1,
-        how="all"
-    )
+    empty_columns = [
+        column
+        for column in df.columns
+        if df[column].isna().all()
+    ]
 
-    # --------------------------------------------------
+    if empty_columns:
+        df = df.drop(
+            columns=empty_columns
+        )
+
+    # --------------------------------------------------------
     # Remove completely empty rows
-    # --------------------------------------------------
+    # --------------------------------------------------------
+
+    empty_rows_before = int(
+        df.isna()
+        .all(axis=1)
+        .sum()
+    )
 
     df = df.dropna(
         axis=0,
         how="all"
     )
 
-    # --------------------------------------------------
-    # Remove exact duplicate rows
-    # --------------------------------------------------
+    # --------------------------------------------------------
+    # Remove exact duplicates
+    # --------------------------------------------------------
 
     duplicate_count = int(
         df.duplicated().sum()
     )
 
-    df = df.drop_duplicates()
+    df = df.drop_duplicates(
+        keep="first"
+    ).reset_index(
+        drop=True
+    )
 
-    # --------------------------------------------------
+    # --------------------------------------------------------
     # Clean text
-    # --------------------------------------------------
+    # --------------------------------------------------------
 
     df = clean_text_values(df)
 
     return df, {
+        "original_rows": original_rows,
+        "original_columns": original_columns,
+        "empty_columns_removed": len(empty_columns),
+        "empty_column_names": empty_columns,
+        "empty_rows_removed": empty_rows_before,
         "duplicate_rows_removed": duplicate_count,
         "rows_after_cleaning": len(df),
-        "columns_after_cleaning": len(df.columns)
+        "columns_after_cleaning": len(df.columns),
+        "column_mapping": {
+            str(old): new
+            for old, new in zip(
+                original_column_names,
+                normalized_columns
+            )
+        }
     }
 
 
 # ============================================================
-# 3. CATEGORY INCONSISTENCY DETECTION
+# COLUMN TYPE DETECTION
+# ============================================================
+
+def detect_column_types(
+    df: pd.DataFrame,
+    numeric_threshold: float = 0.90,
+    date_threshold: float = 0.80
+) -> Dict[str, str]:
+    """
+    Detect likely semantic data types.
+
+    Returns:
+        numeric
+        datetime
+        categorical
+        text
+        boolean
+        empty
+    """
+
+    result = {}
+
+    for column in df.columns:
+
+        series = df[column]
+
+        if series.dropna().empty:
+            result[column] = "empty"
+            continue
+
+        # Existing boolean.
+        if pd.api.types.is_bool_dtype(series):
+            result[column] = "boolean"
+            continue
+
+        # Existing numeric.
+        if pd.api.types.is_numeric_dtype(series):
+            result[column] = "numeric"
+            continue
+
+        # Existing datetime.
+        if pd.api.types.is_datetime64_any_dtype(series):
+            result[column] = "datetime"
+            continue
+
+        non_null = series.dropna()
+
+        # Numeric stored as strings.
+        numeric_converted = pd.to_numeric(
+            non_null,
+            errors="coerce"
+        )
+
+        if (
+            len(non_null) > 0
+            and (
+                numeric_converted.notna().mean()
+                >= numeric_threshold
+            )
+        ):
+
+            # Don't classify obvious ID columns as numeric.
+            if not is_identifier_column(column):
+                result[column] = "numeric"
+                continue
+
+        # Date detection.
+        date_converted = pd.to_datetime(
+            non_null,
+            errors="coerce",
+            format="mixed"
+        )
+
+        if (
+            len(non_null) > 0
+            and (
+                date_converted.notna().mean()
+                >= date_threshold
+            )
+            and looks_like_date_column(column)
+        ):
+            result[column] = "datetime"
+            continue
+
+        # Low-cardinality text = categorical.
+        unique_ratio = (
+            non_null.nunique()
+            / len(non_null)
+            if len(non_null) > 0
+            else 1
+        )
+
+        if (
+            non_null.nunique() <= 50
+            or unique_ratio <= 0.05
+        ):
+            result[column] = "categorical"
+        else:
+            result[column] = "text"
+
+    return result
+
+
+# ============================================================
+# IDENTIFIER DETECTION
+# ============================================================
+
+def is_identifier_column(column: str) -> bool:
+
+    column = column.lower()
+
+    identifier_keywords = [
+        "_id",
+        "id",
+        "code",
+        "sku",
+        "zip",
+        "postal",
+        "phone",
+        "mobile",
+        "account_number",
+        "reference",
+        "ref"
+    ]
+
+    if column in {
+        "id",
+        "code",
+        "sku",
+        "zip"
+    }:
+        return True
+
+    return any(
+        keyword in column
+        for keyword in identifier_keywords
+    )
+
+
+# ============================================================
+# DATE COLUMN DETECTION
+# ============================================================
+
+def looks_like_date_column(column: str) -> bool:
+
+    column = column.lower()
+
+    return any(
+        keyword in column
+        for keyword in DATE_KEYWORDS
+    )
+
+
+# ============================================================
+# CATEGORY INCONSISTENCY DETECTION
 # ============================================================
 
 def detect_category_inconsistencies(
-    df,
-    max_unique_values=20
-):
+    df: pd.DataFrame,
+    max_unique_values: int = 50
+) -> Dict[str, Any]:
+
     issues = {}
 
     categorical_columns = df.select_dtypes(
-        include=["object", "category"]
+        include=["object", "string", "category"]
     ).columns
 
     for column in categorical_columns:
+
+        if is_identifier_column(column):
+            continue
 
         values = (
             df[column]
@@ -116,10 +474,21 @@ def detect_category_inconsistencies(
             .str.strip()
         )
 
+        if values.empty:
+            continue
+
         if values.nunique() > max_unique_values:
             continue
 
-        normalized = values.str.lower()
+        normalized = (
+            values
+            .str.lower()
+            .str.replace(
+                r"\s+",
+                " ",
+                regex=True
+            )
+        )
 
         groups = {}
 
@@ -127,13 +496,16 @@ def detect_category_inconsistencies(
             values,
             normalized
         ):
+
             groups.setdefault(
                 normalized_value,
                 set()
             ).add(original)
 
         inconsistent = {
-            key: sorted(list(variants))
+            key: sorted(
+                list(variants)
+            )
             for key, variants in groups.items()
             if len(variants) > 1
         }
@@ -145,14 +517,221 @@ def detect_category_inconsistencies(
 
 
 # ============================================================
-# 4. MISSING VALUE ANALYSIS
+# CATEGORY STANDARDIZATION
 # ============================================================
 
-def analyze_missing_values(df):
+def standardize_category_values(df):
+    """
+    Standardize categorical/text values without assuming
+    a specific business domain.
+
+    Handles:
+        GUJRANWALA
+        Gujranwala
+        gujranwala
+        " Gujranwala "
+
+    as the same logical category.
+
+    The function avoids blindly converting every value
+    using title-case because datasets may contain:
+
+        USA
+        SQL
+        AI
+        HR
+        CEO
+        B2B
+        B2C
+
+    which should not automatically become:
+
+        Usa
+        Sql
+        Ai
+        Hr
+        Ceo
+        B2b
+        B2c
+    """
+
+    df = df.copy()
+
+    report = {}
+
+    categorical_columns = df.select_dtypes(
+        include=["object", "category", "string"]
+    ).columns
+
+    for column in categorical_columns:
+
+        original = df[column].copy()
+
+        # --------------------------------------------------------
+        # Convert to pandas string while preserving missing values
+        # --------------------------------------------------------
+
+        cleaned = (
+            df[column]
+            .astype("string")
+            .str.strip()
+            .str.replace(
+                r"\s+",
+                " ",
+                regex=True
+            )
+        )
+
+        # --------------------------------------------------------
+        # Case-insensitive normalization key
+        # --------------------------------------------------------
+
+        normalization_key = (
+            cleaned
+            .str.casefold()
+        )
+
+        # --------------------------------------------------------
+        # Find canonical representation
+        #
+        # Most frequent cleaned value becomes canonical.
+        #
+        # Example:
+        #
+        # Karachi
+        # KARACHI
+        # karachi
+        # Karachi
+        #
+        # → Karachi
+        # --------------------------------------------------------
+
+        canonical_map = {}
+
+        temp = pd.DataFrame({
+            "cleaned": cleaned,
+            "key": normalization_key
+        })
+
+        temp = temp.dropna(
+            subset=["key"]
+        )
+
+        for key, group in temp.groupby(
+            "key",
+            sort=False
+        ):
+
+            value_counts = (
+                group["cleaned"]
+                .value_counts()
+            )
+
+            if value_counts.empty:
+                continue
+
+            canonical_value = (
+                value_counts
+                .index[0]
+            )
+
+            canonical_map[key] = (
+                canonical_value
+            )
+
+        # --------------------------------------------------------
+        # Apply canonical values
+        # --------------------------------------------------------
+
+        standardized = (
+            normalization_key
+            .map(canonical_map)
+        )
+
+        # Preserve missing values
+        standardized = standardized.astype("string")
+
+        # --------------------------------------------------------
+        # Detect changes
+        # --------------------------------------------------------
+
+        changed_mask = (
+            cleaned.fillna("__NULL__")
+            != standardized.fillna("__NULL__")
+        )
+
+        changed_count = int(
+            changed_mask.sum()
+        )
+
+        # --------------------------------------------------------
+        # Detect actual category variants
+        # --------------------------------------------------------
+
+        variants = {}
+
+        for key, group in temp.groupby(
+            "key",
+            sort=False
+        ):
+
+            unique_values = (
+                group["cleaned"]
+                .dropna()
+                .unique()
+                .tolist()
+            )
+
+            if len(unique_values) > 1:
+
+                variants[key] = {
+                    "original_variants": (
+                        unique_values
+                    ),
+                    "standardized_value": (
+                        canonical_map.get(key)
+                    )
+                }
+
+        # --------------------------------------------------------
+        # Save result
+        # --------------------------------------------------------
+
+        df[column] = standardized
+
+        if changed_count > 0:
+
+            report[column] = {
+                "values_standardized": (
+                    changed_count
+                ),
+                "category_groups_merged": (
+                    len(variants)
+                ),
+                "variants": variants,
+                "method": (
+                    "whitespace normalization + "
+                    "case-insensitive canonicalization "
+                    "using most frequent representation"
+                )
+            }
+
+    return df, report
+
+# ============================================================
+# MISSING VALUE ANALYSIS
+# ============================================================
+
+def analyze_missing_values(
+    df: pd.DataFrame
+) -> Dict[str, Any]:
 
     missing_report = {}
 
     total_rows = len(df)
+
+    if total_rows == 0:
+        return missing_report
 
     for column in df.columns:
 
@@ -160,61 +739,56 @@ def analyze_missing_values(df):
             df[column].isna().sum()
         )
 
-        missing_percentage = (
-            round(
-                (
-                    missing_count
-                    / total_rows
-                ) * 100,
-                2
-            )
-            if total_rows > 0
-            else 0
+        if missing_count == 0:
+            continue
+
+        missing_percentage = round(
+            (
+                missing_count
+                / total_rows
+            ) * 100,
+            2
         )
 
-        if missing_count > 0:
-
-            missing_report[column] = {
-                "missing_count": missing_count,
-                "missing_percentage": missing_percentage,
-                "data_type": str(df[column].dtype)
-            }
+        missing_report[column] = {
+            "missing_count": missing_count,
+            "missing_percentage": missing_percentage,
+            "data_type": str(
+                df[column].dtype
+            )
+        }
 
     return missing_report
 
 
 # ============================================================
-# 5. DATE VALIDATION
+# DATE VALIDATION
 # ============================================================
 
-def validate_date_columns(df):
+def validate_date_columns(
+    df: pd.DataFrame
+) -> Dict[str, Any]:
 
     date_report = {}
 
-    date_keywords = [
-        "date",
-        "time",
-        "created_at",
-        "updated_at"
-    ]
-
     for column in df.columns:
 
-        column_name = column.lower()
+        if not looks_like_date_column(column):
+            continue
 
-        if not any(
-            keyword in column_name
-            for keyword in date_keywords
-        ):
+        non_null = df[column].notna()
+
+        if not non_null.any():
             continue
 
         converted = pd.to_datetime(
             df[column],
-            errors="coerce"
+            errors="coerce",
+            format="mixed"
         )
 
         invalid_mask = (
-            df[column].notna()
+            non_null
             & converted.isna()
         )
 
@@ -222,52 +796,46 @@ def validate_date_columns(df):
             invalid_mask.sum()
         )
 
-        if invalid_count > 0:
-
-            date_report[column] = {
-                "invalid_count": invalid_count,
-                "invalid_percentage": round(
-                    (
-                        invalid_count
-                        / len(df)
-                    ) * 100,
-                    2
-                ) if len(df) > 0 else 0
-            }
+        date_report[column] = {
+            "invalid_count": invalid_count,
+            "invalid_percentage": round(
+                (
+                    invalid_count
+                    / len(df)
+                ) * 100,
+                2
+            ) if len(df) > 0 else 0,
+            "valid_count": int(
+                converted.notna().sum()
+            )
+        }
 
     return date_report
 
 
 # ============================================================
-# 6. DATE STANDARDIZATION
+# DATE STANDARDIZATION
 # ============================================================
 
-def standardize_date_columns(df):
+def standardize_date_columns(
+    df: pd.DataFrame
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
 
     df = df.copy()
 
     report = {}
 
-    date_keywords = [
-        "date",
-        "time",
-        "created_at",
-        "updated_at"
-    ]
-
     for column in df.columns:
 
-        column_name = column.lower()
-
-        if not any(
-            keyword in column_name
-            for keyword in date_keywords
-        ):
+        if not looks_like_date_column(column):
             continue
 
         original_non_null = int(
             df[column].notna().sum()
         )
+
+        if original_non_null == 0:
+            continue
 
         converted = pd.to_datetime(
             df[column],
@@ -284,35 +852,93 @@ def standardize_date_columns(df):
             - valid_count
         )
 
-        df[column] = converted.dt.strftime(
-            "%Y-%m-%d"
-        )
+        # Only convert if a reasonable amount is valid.
+        if (
+            original_non_null > 0
+            and valid_count / original_non_null >= 0.80
+        ):
 
-        df.loc[
-            converted.isna(),
-            column
-        ] = None
+            df[column] = converted.dt.strftime(
+                "%Y-%m-%d"
+            )
 
-        report[column] = {
-            "valid_dates": valid_count,
-            "invalid_dates": invalid_count,
-            "standard_format": "YYYY-MM-DD"
-        }
+            df.loc[
+                converted.isna(),
+                column
+            ] = None
+
+            report[column] = {
+                "valid_dates": valid_count,
+                "invalid_dates": invalid_count,
+                "standard_format": "YYYY-MM-DD"
+            }
+
+        else:
+
+            report[column] = {
+                "valid_dates": valid_count,
+                "invalid_dates": invalid_count,
+                "standard_format": "not_changed",
+                "reason": (
+                    "Too many invalid values "
+                    "to safely standardize"
+                )
+            }
 
     return df, report
 
 
 # ============================================================
-# 7. NUMERIC VALIDATION
+# NUMERIC COLUMN DETECTION
 # ============================================================
 
-def validate_numeric_columns(df):
+def get_numeric_columns(
+    df: pd.DataFrame
+) -> List[str]:
+
+    columns = []
+
+    for column in df.columns:
+
+        if pd.api.types.is_numeric_dtype(
+            df[column]
+        ):
+            columns.append(column)
+            continue
+
+        if is_identifier_column(column):
+            continue
+
+        values = df[column].dropna()
+
+        if values.empty:
+            continue
+
+        converted = pd.to_numeric(
+            values,
+            errors="coerce"
+        )
+
+        if (
+            converted.notna().mean()
+            >= 0.90
+        ):
+            columns.append(column)
+
+    return columns
+
+
+# ============================================================
+# NUMERIC VALIDATION
+# ============================================================
+
+def validate_numeric_columns(
+    df: pd.DataFrame
+) -> Dict[str, Any]:
 
     numeric_report = {}
 
-    numeric_columns = df.select_dtypes(
-        include="number"
-    ).columns
+    numeric_columns = get_numeric_columns(df)
 
     for column in numeric_columns:
 
@@ -321,61 +947,78 @@ def validate_numeric_columns(df):
             errors="coerce"
         )
 
-        negative_count = int(
-            (values < 0).sum()
-        )
-
-        zero_count = int(
-            (values == 0).sum()
-        )
-
-        missing_count = int(
-            values.isna().sum()
-        )
+        valid_values = values.dropna()
 
         numeric_report[column] = {
-            "data_type": str(df[column].dtype),
+            "data_type": str(
+                df[column].dtype
+            ),
             "minimum": (
-                float(values.min())
-                if not values.dropna().empty
+                safe_value(
+                    valid_values.min()
+                )
+                if not valid_values.empty
                 else None
             ),
             "maximum": (
-                float(values.max())
-                if not values.dropna().empty
+                safe_value(
+                    valid_values.max()
+                )
+                if not valid_values.empty
                 else None
             ),
-            "negative_values": negative_count,
-            "zero_values": zero_count,
-            "missing_values": missing_count
+            "mean": (
+                safe_value(
+                    valid_values.mean()
+                )
+                if not valid_values.empty
+                else None
+            ),
+            "negative_values": int(
+                (values < 0).sum()
+            ),
+            "zero_values": int(
+                (values == 0).sum()
+            ),
+            "missing_values": int(
+                values.isna().sum()
+            )
         }
 
     return numeric_report
 
 
 # ============================================================
-# 8. OUTLIER DETECTION
+# OUTLIER DETECTION
 # ============================================================
 
-def detect_outliers(df):
+def detect_outliers(
+    df: pd.DataFrame,
+    minimum_values: int = 4
+) -> Dict[str, Any]:
 
     outlier_report = {}
 
-    numeric_columns = df.select_dtypes(
-        include="number"
-    ).columns
+    numeric_columns = get_numeric_columns(df)
 
     for column in numeric_columns:
 
-        values = df[column].dropna()
+        values = pd.to_numeric(
+            df[column],
+            errors="coerce"
+        ).dropna()
 
-        if len(values) < 4:
+        if len(values) < minimum_values:
             continue
 
         q1 = values.quantile(0.25)
         q3 = values.quantile(0.75)
 
         iqr = q3 - q1
+
+        # Constant column.
+        if iqr == 0:
+            continue
 
         lower_bound = (
             q1 - 1.5 * iqr
@@ -386,399 +1029,559 @@ def detect_outliers(df):
         )
 
         outlier_mask = (
-            (df[column] < lower_bound)
-            | (df[column] > upper_bound)
+            pd.to_numeric(
+                df[column],
+                errors="coerce"
+            )
+            .lt(lower_bound)
+            |
+            pd.to_numeric(
+                df[column],
+                errors="coerce"
+            )
+            .gt(upper_bound)
         )
 
         outlier_count = int(
             outlier_mask.sum()
         )
 
-        if outlier_count > 0:
+        if outlier_count == 0:
+            continue
 
-            sample_outliers = (
-                df.loc[
-                    outlier_mask,
-                    column
-                ]
-                .head(10)
-                .tolist()
-            )
+        sample_outliers = (
+            df.loc[
+                outlier_mask,
+                column
+            ]
+            .head(10)
+            .apply(safe_value)
+            .tolist()
+        )
 
-            outlier_report[column] = {
-                "outlier_count": outlier_count,
-                "outlier_percentage": round(
-                    (
-                        outlier_count
-                        / len(df)
-                    ) * 100,
-                    2
-                ),
-                "q1": float(q1),
-                "q3": float(q3),
-                "iqr": float(iqr),
-                "lower_bound": float(lower_bound),
-                "upper_bound": float(upper_bound),
-                "sample_outliers": sample_outliers
-            }
+        outlier_report[column] = {
+            "outlier_count": outlier_count,
+            "outlier_percentage": round(
+                (
+                    outlier_count
+                    / len(df)
+                ) * 100,
+                2
+            ),
+            "q1": safe_value(q1),
+            "q3": safe_value(q3),
+            "iqr": safe_value(iqr),
+            "lower_bound": safe_value(
+                lower_bound
+            ),
+            "upper_bound": safe_value(
+                upper_bound
+            ),
+            "sample_outliers": sample_outliers
+        }
 
     return outlier_report
 
 
 # ============================================================
-# 9. BUSINESS RULE VALIDATION
+# COLUMN RESOLUTION
 # ============================================================
 
-def validate_business_rules(df):
+def find_column(
+    df: pd.DataFrame,
+    aliases: List[str]
+) -> Optional[str]:
+
+    columns = {
+        column.lower(): column
+        for column in df.columns
+    }
+
+    for alias in aliases:
+
+        if alias.lower() in columns:
+            return columns[
+                alias.lower()
+            ]
+
+    return None
+
+
+def find_numeric_column(
+    df: pd.DataFrame,
+    aliases: List[str]
+) -> Optional[str]:
+
+    column = find_column(
+        df,
+        aliases
+    )
+
+    if column is None:
+        return None
+
+    values = pd.to_numeric(
+        df[column],
+        errors="coerce"
+    )
+
+    if values.notna().sum() == 0:
+        return None
+
+    return column
+
+
+# ============================================================
+# BUSINESS COLUMN RESOLUTION
+# ============================================================
+
+def resolve_business_columns(
+    df: pd.DataFrame
+) -> Dict[str, Optional[str]]:
+
+    return {
+
+        "order_id": find_column(
+            df,
+            [
+                "order_id",
+                "orderid",
+                "order_number"
+            ]
+        ),
+
+        "quantity": find_numeric_column(
+            df,
+            [
+                "quantity",
+                "qty",
+                "units",
+                "units_sold"
+            ]
+        ),
+
+        "unit_price": find_numeric_column(
+            df,
+            [
+                "unit_price",
+                "unitprice",
+                "selling_price",
+                "sale_price"
+            ]
+        ),
+
+        "discount_percent": find_numeric_column(
+            df,
+            [
+                "discount_percent",
+                "discount_pct",
+                "discount_percentage"
+            ]
+        ),
+
+        "discount": find_numeric_column(
+            df,
+            [
+                "discount"
+            ]
+        ),
+
+        "sales": find_numeric_column(
+            df,
+            [
+                "sales",
+                "revenue",
+                "total_sales",
+                "total_revenue",
+                "net_sales"
+            ]
+        ),
+
+        "unit_cost": find_numeric_column(
+            df,
+            [
+                "unit_cost",
+                "unit_cost_price",
+                "cost_per_unit"
+            ]
+        ),
+
+        "total_cost": find_numeric_column(
+            df,
+            [
+                "total_cost",
+                "cost",
+                "total_expense",
+                "total_cogs"
+            ]
+        ),
+
+        "profit": find_numeric_column(
+            df,
+            [
+                "profit",
+                "gross_profit",
+                "net_profit"
+            ]
+        ),
+
+        "status": find_column(
+            df,
+            [
+                "order_status",
+                "delivery_status",
+                "shipment_status",
+                "status"
+            ]
+        ),
+
+        "return_status": find_column(
+            df,
+            [
+                "return_status",
+                "returned",
+                "is_returned"
+            ]
+        )
+    }
+
+
+# ============================================================
+# DISCOUNT RESOLUTION
+# ============================================================
+
+def get_discount_percentage(
+    df: pd.DataFrame,
+    columns: Dict[str, Optional[str]]
+) -> Optional[pd.Series]:
+
+    discount_percent_col = columns[
+        "discount_percent"
+    ]
+
+    if discount_percent_col:
+
+        return pd.to_numeric(
+            df[discount_percent_col],
+            errors="coerce"
+        )
+
+    # "discount" is ambiguous.
+    #
+    # We only interpret it as a percentage if
+    # all non-null values are between 0 and 100.
+    discount_col = columns[
+        "discount"
+    ]
+
+    if discount_col:
+
+        values = pd.to_numeric(
+            df[discount_col],
+            errors="coerce"
+        )
+
+        valid = values.dropna()
+
+        if (
+            not valid.empty
+            and valid.between(0, 100).all()
+        ):
+            return values
+
+    return None
+
+
+# ============================================================
+# BUSINESS RULE VALIDATION
+# ============================================================
+
+def validate_business_rules(
+    df: pd.DataFrame
+) -> Dict[str, Any]:
 
     issues = {}
 
-    data = df.copy()
+    if df.empty:
+        return issues
 
-    # --------------------------------------------------
-    # Helper: find column safely
-    # --------------------------------------------------
+    columns = resolve_business_columns(
+        df
+    )
 
-    def find_column(possible_names):
+    quantity_col = columns["quantity"]
+    unit_price_col = columns["unit_price"]
+    sales_col = columns["sales"]
+    unit_cost_col = columns["unit_cost"]
+    total_cost_col = columns["total_cost"]
+    profit_col = columns["profit"]
 
-        for name in possible_names:
-
-            if name in data.columns:
-                return name
-
-        return None
-
-    quantity_col = find_column([
-        "quantity",
-        "qty"
-    ])
-
-    unit_price_col = find_column([
-        "unit_price",
-        "unitprice",
-        "price"
-    ])
-
-    discount_col = find_column([
-        "discount",
-        "discount_percent"
-    ])
-
-    sales_col = find_column([
-        "sales",
-        "revenue",
-        "total_sales"
-    ])
-
-    cost_col = find_column([
-        "cost_price",
-        "cost",
-        "total_cost"
-    ])
-
-    profit_col = find_column([
-        "profit",
-        "gross_profit"
-    ])
-
-    order_id_col = find_column([
-        "order_id",
-        "orderid",
-        "id"
-    ])
-
-    # ==================================================
-    # 1. SALES CONSISTENCY
-    # ==================================================
+    # ========================================================
+    # SALES CONSISTENCY
+    # ========================================================
 
     if (
         quantity_col
         and unit_price_col
-        and discount_col
         and sales_col
     ):
 
-        temp = data[
-            [
-                quantity_col,
-                unit_price_col,
-                discount_col,
-                sales_col
-            ]
-        ].copy()
-
-        temp = temp.apply(
-            pd.to_numeric,
+        quantity = pd.to_numeric(
+            df[quantity_col],
             errors="coerce"
         )
 
-        valid = temp.notna().all(axis=1)
-
-        expected_sales = (
-            temp[quantity_col]
-            * temp[unit_price_col]
-            * (
-                1
-                - temp[discount_col] / 100
-            )
+        unit_price = pd.to_numeric(
+            df[unit_price_col],
+            errors="coerce"
         )
 
-        actual_sales = temp[sales_col]
+        sales = pd.to_numeric(
+            df[sales_col],
+            errors="coerce"
+        )
+
+        discount = get_discount_percentage(
+            df,
+            columns
+        )
+
+        expected_sales = (
+            quantity
+            * unit_price
+        )
+
+        if discount is not None:
+
+            expected_sales = (
+                expected_sales
+                * (
+                    1
+                    - discount / 100
+                )
+            )
+
+        valid = (
+            quantity.notna()
+            & unit_price.notna()
+            & sales.notna()
+        )
+
+        if discount is not None:
+            valid = (
+                valid
+                & discount.notna()
+            )
 
         difference = (
-            actual_sales
+            sales
             - expected_sales
         )
 
-        # Small rounding differences are acceptable.
-        tolerance = 1.0
-
-        inconsistent_mask = (
+        inconsistent = (
             valid
-            & (
-                difference.abs()
-                > tolerance
+            & difference.abs().gt(
+                DEFAULT_TOLERANCE
             )
         )
 
-        inconsistent_count = int(
-            inconsistent_mask.sum()
+        count = int(
+            inconsistent.sum()
         )
 
-        sample_records = []
+        samples = []
 
-        if inconsistent_count > 0:
+        if count > 0:
 
-            problem_indexes = (
-                data.index[
-                    inconsistent_mask
-                ].tolist()
-            )
-
-            for index in problem_indexes[:10]:
+            for index in df.index[
+                inconsistent
+            ][:10]:
 
                 record = {
                     "quantity": safe_value(
-                        temp.loc[
-                            index,
-                            quantity_col
-                        ]
+                        quantity.loc[index]
                     ),
                     "unit_price": safe_value(
-                        temp.loc[
-                            index,
-                            unit_price_col
-                        ]
-                    ),
-                    "discount": safe_value(
-                        temp.loc[
-                            index,
-                            discount_col
-                        ]
+                        unit_price.loc[index]
                     ),
                     "sales": safe_value(
-                        temp.loc[
-                            index,
-                            sales_col
-                        ]
+                        sales.loc[index]
                     ),
-                    "expected_sales": safe_value(
-                        round(
-                            expected_sales.loc[index],
-                            2
+                    "expected_sales":
+                        safe_value(
+                            round(
+                                expected_sales.loc[
+                                    index
+                                ],
+                                2
+                            )
+                        ),
+                    "difference":
+                        safe_value(
+                            round(
+                                difference.loc[
+                                    index
+                                ],
+                                2
+                            )
                         )
-                    ),
-                    "difference": safe_value(
-                        round(
-                            difference.loc[index],
-                            2
-                        )
-                    )
                 }
 
-                if order_id_col:
+                if discount is not None:
+                    record[
+                        "discount_percent"
+                    ] = safe_value(
+                        discount.loc[index]
+                    )
 
-                    record["order_id"] = safe_value(
-                        data.loc[
+                order_id_col = columns[
+                    "order_id"
+                ]
+
+                if order_id_col:
+                    record[
+                        "order_id"
+                    ] = safe_value(
+                        df.loc[
                             index,
                             order_id_col
                         ]
                     )
 
-                sample_records.append(record)
+                samples.append(record)
 
         issues["sales_consistency"] = {
-            "inconsistent_count": inconsistent_count,
-            "issue": (
-                "Sales does not match "
-                "quantity × unit_price × "
-                "(1 - discount/100)"
+            "checked": True,
+            "inconsistent_count": count,
+            "formula": (
+                "sales = quantity × "
+                "unit_price × "
+                "(1 - discount_percent / 100)"
             ),
-            "tolerance": tolerance,
+            "tolerance": DEFAULT_TOLERANCE,
             "severity": (
                 "medium"
-                if inconsistent_count > 0
+                if count > 0
                 else "none"
             ),
-            "sample_records": sample_records
+            "sample_records": samples
         }
 
-    # ==================================================
-    # 2. PROFIT CONSISTENCY
-    #
-    # Total Cost = Quantity × Cost Price
-    # Profit = Sales - Total Cost
-    # ==================================================
+    # ========================================================
+    # PROFIT CONSISTENCY
+    # ========================================================
 
     if (
         sales_col
-        and cost_col
         and quantity_col
         and profit_col
+        and (
+            unit_cost_col
+            or total_cost_col
+        )
     ):
 
         sales = pd.to_numeric(
-            data[sales_col],
-            errors="coerce"
-        )
-
-        cost_price = pd.to_numeric(
-            data[cost_col],
+            df[sales_col],
             errors="coerce"
         )
 
         quantity = pd.to_numeric(
-            data[quantity_col],
+            df[quantity_col],
             errors="coerce"
         )
 
         profit = pd.to_numeric(
-            data[profit_col],
+            df[profit_col],
             errors="coerce"
         )
 
+        if unit_cost_col:
+
+            unit_cost = pd.to_numeric(
+                df[unit_cost_col],
+                errors="coerce"
+            )
+
+            expected_cost = (
+                quantity
+                * unit_cost
+            )
+
+        else:
+
+            expected_cost = pd.to_numeric(
+                df[total_cost_col],
+                errors="coerce"
+            )
+
         expected_profit = (
             sales
-            - (
-                quantity
-                * cost_price
-            )
+            - expected_cost
         )
 
-        profit_difference = (
+        difference = (
             profit
             - expected_profit
         )
 
-        valid_profit = (
+        valid = (
             sales.notna()
-            & cost_price.notna()
             & quantity.notna()
             & profit.notna()
+            & expected_cost.notna()
         )
 
-        tolerance = 1.0
-
-        inconsistent_mask = (
-            valid_profit
-            & (
-                profit_difference.abs()
-                > tolerance
+        inconsistent = (
+            valid
+            & difference.abs().gt(
+                DEFAULT_TOLERANCE
             )
         )
 
-        inconsistent_count = int(
-            inconsistent_mask.sum()
+        count = int(
+            inconsistent.sum()
         )
 
-        sample_records = []
-
-        if inconsistent_count > 0:
-
-            sample_df = data.loc[
-                inconsistent_mask
-            ].copy()
-
-            for index, row in sample_df.head(10).iterrows():
-
-                record = {
-                    "sales": safe_value(
-                        row.get(sales_col)
-                    ),
-                    "quantity": safe_value(
-                        row.get(quantity_col)
-                    ),
-                    "cost_price": safe_value(
-                        row.get(cost_col)
-                    ),
-                    "profit": safe_value(
-                        row.get(profit_col)
-                    ),
-                    "expected_profit": safe_value(
-                        round(
-                            expected_profit.loc[index],
-                            2
-                        )
-                    ),
-                    "difference": safe_value(
-                        round(
-                            profit_difference.loc[index],
-                            2
-                        )
-                    )
-                }
-
-                if order_id_col:
-
-                    record["order_id"] = safe_value(
-                        row.get(order_id_col)
-                    )
-
-                sample_records.append(record)
-
         issues["profit_consistency"] = {
-            "inconsistent_count": inconsistent_count,
-            "issue": (
-                "Profit does not match "
-                "sales - (quantity × cost_price)"
-            ),
+            "checked": True,
+            "inconsistent_count": count,
             "formula": (
-                "profit = sales - "
-                "(quantity × cost_price)"
+                "profit = sales - cost"
             ),
-            "tolerance": tolerance,
+            "cost_interpretation": (
+                "quantity × unit_cost"
+                if unit_cost_col
+                else "total_cost"
+            ),
+            "tolerance": DEFAULT_TOLERANCE,
             "severity": (
-                "none"
-                if inconsistent_count == 0
-                else "medium"
-            ),
-            "sample_records": sample_records
+                "medium"
+                if count > 0
+                else "none"
+            )
         }
 
-    # ==================================================
-    # 3. NEGATIVE PROFIT
-    # ==================================================
+    # ========================================================
+    # NEGATIVE PROFIT
+    # ========================================================
 
     if profit_col:
 
-        profit_values = pd.to_numeric(
-            data[profit_col],
+        profit = pd.to_numeric(
+            df[profit_col],
             errors="coerce"
         )
 
-        negative_mask = (
-            profit_values < 0
-        )
-
         negative_count = int(
-            negative_mask.sum()
+            profit.lt(0).sum()
         )
 
         issues["negative_profit"] = {
             "count": negative_count,
             "issue": (
                 "Negative profit indicates "
-                "a potential business loss"
+                "a potential business loss."
             ),
             "action": "flag_only",
             "severity": (
@@ -788,116 +1591,234 @@ def validate_business_rules(df):
             )
         }
 
-    # ==================================================
-    # 4. QUANTITY VALIDATION
-    # ==================================================
+    # ========================================================
+    # QUANTITY VALIDATION
+    # ========================================================
 
     if quantity_col:
 
-        quantity_values = pd.to_numeric(
-            data[quantity_col],
+        quantity = pd.to_numeric(
+            df[quantity_col],
             errors="coerce"
         )
 
-        negative_quantity = int(
-            (quantity_values < 0).sum()
+        negative_count = int(
+            quantity.lt(0).sum()
         )
 
-        zero_quantity = int(
-            (quantity_values == 0).sum()
+        zero_count = int(
+            quantity.eq(0).sum()
         )
 
-        missing_quantity = int(
-            quantity_values.isna().sum()
+        missing_count = int(
+            quantity.isna().sum()
         )
 
         issues["quantity_validation"] = {
-            "negative_count": negative_quantity,
-            "zero_count": zero_quantity,
-            "missing_count": missing_quantity,
+            "negative_count": negative_count,
+            "zero_count": zero_count,
+            "missing_count": missing_count,
             "severity": (
                 "high"
-                if negative_quantity > 0
+                if negative_count > 0
                 else "medium"
                 if (
-                    zero_quantity > 0
-                    or missing_quantity > 0
+                    zero_count > 0
+                    or missing_count > 0
                 )
                 else "none"
             )
         }
 
-    # ==================================================
-    # 5. DISCOUNT VALIDATION
-    # ==================================================
-
-    if discount_col:
-
-        discount_values = pd.to_numeric(
-            data[discount_col],
-            errors="coerce"
-        )
-
-        negative_discount = int(
-            (discount_values < 0).sum()
-        )
-
-        excessive_discount = int(
-            (discount_values > 100).sum()
-        )
-
-        issues["discount_validation"] = {
-            "negative_count": negative_discount,
-            "above_100_percent": excessive_discount,
-            "severity": (
-                "high"
-                if (
-                    negative_discount > 0
-                    or excessive_discount > 0
-                )
-                else "none"
-            )
-        }
-
-    # ==================================================
-    # 6. UNIT PRICE VALIDATION
-    # ==================================================
+    # ========================================================
+    # UNIT PRICE
+    # ========================================================
 
     if unit_price_col:
 
-        price_values = pd.to_numeric(
-            data[unit_price_col],
+        price = pd.to_numeric(
+            df[unit_price_col],
             errors="coerce"
         )
 
-        negative_price = int(
-            (price_values < 0).sum()
+        negative_count = int(
+            price.lt(0).sum()
         )
 
-        zero_price = int(
-            (price_values == 0).sum()
+        zero_count = int(
+            price.eq(0).sum()
         )
 
         issues["unit_price_validation"] = {
-            "negative_count": negative_price,
-            "zero_count": zero_price,
+            "negative_count": negative_count,
+            "zero_count": zero_count,
             "severity": (
                 "high"
-                if negative_price > 0
+                if negative_count > 0
                 else "medium"
-                if zero_price > 0
+                if zero_count > 0
                 else "none"
             )
         }
+
+    # ========================================================
+    # DISCOUNT
+    # ========================================================
+
+    discount = get_discount_percentage(
+        df,
+        columns
+    )
+
+    if discount is not None:
+
+        negative_count = int(
+            discount.lt(0).sum()
+        )
+
+        excessive_count = int(
+            discount.gt(100).sum()
+        )
+
+        issues["discount_validation"] = {
+            "negative_count": negative_count,
+            "above_100_percent": excessive_count,
+            "severity": (
+                "high"
+                if (
+                    negative_count > 0
+                    or excessive_count > 0
+                )
+                else "none"
+            )
+        }
+
+    # ========================================================
+    # STATUS VALIDATION
+    # ========================================================
+
+    status_col = columns["status"]
+
+    if status_col:
+
+        status = (
+            df[status_col]
+            .astype("string")
+            .str.strip()
+            .str.lower()
+        )
+
+        completed_mask = status.isin([
+            "completed",
+            "complete",
+            "delivered",
+            "shipped",
+            "fulfilled"
+        ])
+
+        critical_columns = [
+            column
+            for column in [
+                quantity_col,
+                sales_col,
+                profit_col
+            ]
+            if column
+        ]
+
+        completed_issues = {}
+
+        for column in critical_columns:
+
+            missing_count = int(
+                (
+                    completed_mask
+                    & df[column].isna()
+                ).sum()
+            )
+
+            if missing_count > 0:
+
+                completed_issues[column] = {
+                    "missing_count":
+                        missing_count,
+                    "severity": "high"
+                }
+
+        if completed_issues:
+
+            issues[
+                "completed_orders"
+            ] = completed_issues
+
+    # ========================================================
+    # RETURN VALIDATION
+    # ========================================================
+
+    return_status_col = columns[
+        "return_status"
+    ]
+
+    if return_status_col:
+
+        return_status = (
+            df[return_status_col]
+            .astype("string")
+            .str.strip()
+            .str.lower()
+        )
+
+        returned_mask = return_status.isin([
+            "yes",
+            "returned",
+            "true",
+            "1"
+        ])
+
+        return_issues = {}
+
+        for column in [
+            sales_col,
+            profit_col
+        ]:
+
+            if not column:
+                continue
+
+            missing_count = int(
+                (
+                    returned_mask
+                    & df[column].isna()
+                ).sum()
+            )
+
+            if missing_count > 0:
+
+                return_issues[column] = {
+                    "missing_count":
+                        missing_count,
+                    "severity": "high"
+                }
+
+        if return_issues:
+
+            issues[
+                "returned_orders"
+            ] = return_issues
 
     return issues
 
 
 # ============================================================
-# 10. MISSING VALUE IMPUTATION
+# MISSING VALUE IMPUTATION
 # ============================================================
 
-def impute_missing_values(df):
+def impute_missing_values(
+    df: pd.DataFrame,
+    numeric_method: str = "median",
+    categorical_method: str = "mode",
+    max_categorical_missing_percentage: float = 50.0
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
 
     df = df.copy()
 
@@ -912,17 +1833,49 @@ def impute_missing_values(df):
         if missing_count == 0:
             continue
 
-        # --------------------------------------------------
-        # Numeric columns → median
-        # --------------------------------------------------
+        missing_percentage = (
+            missing_count
+            / len(df)
+            * 100
+            if len(df) > 0
+            else 0
+        )
+
+        # ----------------------------------------------------
+        # Do NOT automatically impute identifier columns.
+        # ----------------------------------------------------
+
+        if is_identifier_column(column):
+
+            report[column] = {
+                "method": "not_imputed",
+                "missing_values":
+                    missing_count,
+                "reason":
+                    "Identifier column"
+            }
+
+            continue
+
+        # ----------------------------------------------------
+        # Numeric
+        # ----------------------------------------------------
 
         if pd.api.types.is_numeric_dtype(
             df[column]
         ):
 
-            replacement = (
-                df[column].median()
-            )
+            if numeric_method == "median":
+
+                replacement = df[
+                    column
+                ].median()
+
+            else:
+
+                replacement = df[
+                    column
+                ].mean()
 
             if pd.notna(replacement):
 
@@ -932,22 +1885,46 @@ def impute_missing_values(df):
                 )
 
                 report[column] = {
-                    "method": "median",
+                    "method":
+                        numeric_method,
                     "missing_values_filled":
                         missing_count,
                     "replacement_value":
-                        safe_value(replacement)
+                        safe_value(
+                            replacement
+                        )
                 }
 
-        # --------------------------------------------------
-        # Text columns → mode
-        # --------------------------------------------------
+        # ----------------------------------------------------
+        # Text / categorical
+        # ----------------------------------------------------
 
         else:
 
+            # Don't fill a mostly empty text column
+            # with an arbitrary mode.
+            if (
+                missing_percentage
+                > max_categorical_missing_percentage
+            ):
+
+                report[column] = {
+                    "method":
+                        "not_imputed",
+                    "missing_values":
+                        missing_count,
+                    "reason":
+                        (
+                            "Too many missing "
+                            "categorical values"
+                        )
+                }
+
+                continue
+
             mode_values = (
                 df[column]
-                .mode()
+                .mode(dropna=True)
             )
 
             if not mode_values.empty:
@@ -962,21 +1939,34 @@ def impute_missing_values(df):
                 )
 
                 report[column] = {
-                    "method": "mode",
+                    "method":
+                        categorical_method,
                     "missing_values_filled":
                         missing_count,
                     "replacement_value":
-                        safe_value(replacement)
+                        safe_value(
+                            replacement
+                        )
                 }
 
     return df, report
 
 
 # ============================================================
-# 11. BUSINESS-RULE RECONSTRUCTION
+# BUSINESS-RULE RECONSTRUCTION
 # ============================================================
 
-def reconstruct_business_values(df):
+def reconstruct_business_values(
+    df: pd.DataFrame
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+
+    """
+    Reconstruct values only when the dataset clearly supports
+    the required business formula.
+
+    This function intentionally does NOT attempt to reconstruct
+    arbitrary datasets.
+    """
 
     df = df.copy()
 
@@ -985,38 +1975,45 @@ def reconstruct_business_values(df):
         "business_logic_issues": {}
     }
 
-    # --------------------------------------------------
-    # Helper
-    # --------------------------------------------------
+    columns = resolve_business_columns(
+        df
+    )
 
-    def has_columns(*columns):
+    quantity_col = columns["quantity"]
+    unit_price_col = columns["unit_price"]
+    sales_col = columns["sales"]
+    unit_cost_col = columns["unit_cost"]
+    total_cost_col = columns["total_cost"]
+    profit_col = columns["profit"]
 
-        return all(
-            column in df.columns
-            for column in columns
-        )
+    # ========================================================
+    # SALES
+    # ========================================================
 
-    # ==================================================
-    # 11.1 SALES RECONSTRUCTION & VALIDATION
-    #
-    # Sales =
-    # Quantity × Unit Price × (1 - Discount/100)
-    # ==================================================
-
-    if has_columns(
-        "sales",
-        "quantity",
-        "unit_price"
+    if (
+        sales_col
+        and quantity_col
+        and unit_price_col
     ):
 
         quantity = pd.to_numeric(
-            df["quantity"],
+            df[quantity_col],
             errors="coerce"
         )
 
         unit_price = pd.to_numeric(
-            df["unit_price"],
+            df[unit_price_col],
             errors="coerce"
+        )
+
+        sales = pd.to_numeric(
+            df[sales_col],
+            errors="coerce"
+        )
+
+        discount = get_discount_percentage(
+            df,
+            columns
         )
 
         calculated_sales = (
@@ -1024,12 +2021,7 @@ def reconstruct_business_values(df):
             * unit_price
         )
 
-        if "discount" in df.columns:
-
-            discount = pd.to_numeric(
-                df["discount"],
-                errors="coerce"
-            )
+        if discount is not None:
 
             calculated_sales = (
                 calculated_sales
@@ -1039,32 +2031,31 @@ def reconstruct_business_values(df):
                 )
             )
 
-        # --------------------------------------------------
+        # ----------------------------------------------------
         # Reconstruct missing sales
-        # --------------------------------------------------
+        # ----------------------------------------------------
 
         sales_missing = (
-            df["sales"].isna()
+            sales.isna()
             & quantity.notna()
             & unit_price.notna()
         )
 
-        if "discount" in df.columns:
-
+        if discount is not None:
             sales_missing = (
                 sales_missing
                 & discount.notna()
             )
 
-        sales_count = int(
+        count = int(
             sales_missing.sum()
         )
 
-        if sales_count > 0:
+        if count > 0:
 
             df.loc[
                 sales_missing,
-                "sales"
+                sales_col
             ] = calculated_sales[
                 sales_missing
             ]
@@ -1072,614 +2063,385 @@ def reconstruct_business_values(df):
         report[
             "reconstructed_values"
         ]["sales"] = {
+            "column": sales_col,
+            "values_reconstructed": count,
             "method": (
+                "quantity × unit_price"
+                if discount is None
+                else
                 "quantity × unit_price × "
-                "(1 - discount/100)"
-            ),
-            "values_reconstructed":
-                sales_count
+                "(1 - discount_percent / 100)"
+            )
         }
 
-        # --------------------------------------------------
-        # Validate existing sales
-        # --------------------------------------------------
+        # ----------------------------------------------------
+        # Validate sales
+        # ----------------------------------------------------
 
-        valid_sales_mask = (
-            df["sales"].notna()
+        current_sales = pd.to_numeric(
+            df[sales_col],
+            errors="coerce"
+        )
+
+        valid = (
+            current_sales.notna()
             & quantity.notna()
             & unit_price.notna()
         )
 
-        if "discount" in df.columns:
-
-            valid_sales_mask = (
-                valid_sales_mask
+        if discount is not None:
+            valid = (
+                valid
                 & discount.notna()
             )
 
-        sales_difference = (
-            pd.to_numeric(
-                df["sales"],
-                errors="coerce"
-            )
+        difference = (
+            current_sales
             - calculated_sales
         )
 
-        tolerance = 1.0
-
-        inconsistent_sales = (
-            valid_sales_mask
-            & (
-                sales_difference.abs()
-                > tolerance
+        inconsistent = (
+            valid
+            & difference.abs().gt(
+                DEFAULT_TOLERANCE
             )
         )
 
-        sales_issue_count = int(
-            inconsistent_sales.sum()
+        count = int(
+            inconsistent.sum()
         )
-
-        sales_samples = []
-
-        if sales_issue_count > 0:
-
-            sample_columns = [
-                column
-                for column in [
-                    "order_id",
-                    "quantity",
-                    "unit_price",
-                    "discount",
-                    "sales"
-                ]
-                if column in df.columns
-            ]
-
-            sales_samples_df = (
-                df.loc[
-                    inconsistent_sales,
-                    sample_columns
-                ]
-                .copy()
-            )
-
-            sales_samples_df[
-                "expected_sales"
-            ] = calculated_sales[
-                inconsistent_sales
-            ]
-
-            sales_samples_df[
-                "difference"
-            ] = sales_difference[
-                inconsistent_sales
-            ]
-
-            sales_samples = (
-                sales_samples_df
-                .head(10)
-                .astype(object)
-                .where(
-                    pd.notnull(
-                        sales_samples_df.head(10)
-                    ),
-                    None
-                )
-                .to_dict(
-                    orient="records"
-                )
-            )
 
         report[
             "business_logic_issues"
         ]["sales_consistency"] = {
-            "inconsistent_count":
-                sales_issue_count,
-            "issue": (
-                "Sales does not match "
-                "quantity × unit_price × "
-                "(1 - discount/100)"
-            ),
-            "tolerance": tolerance,
+            "inconsistent_count": count,
+            "tolerance":
+                DEFAULT_TOLERANCE,
             "severity": (
                 "medium"
-                if sales_issue_count > 0
+                if count > 0
                 else "none"
-            ),
-            "sample_records":
-                sales_samples
+            )
         }
 
-    # ==================================================
-    # 11.2 PROFIT RECONSTRUCTION & VALIDATION
-    #
-    # Total Cost =
-    # Quantity × Cost Price
-    #
-    # Profit =
-    # Sales - Total Cost
-    # ==================================================
+    # ========================================================
+    # PROFIT
+    # ========================================================
 
-    if has_columns(
-        "sales",
-        "quantity",
-        "cost_price",
-        "profit"
+    if (
+        sales_col
+        and profit_col
+        and (
+            unit_cost_col
+            or total_cost_col
+        )
     ):
 
         sales = pd.to_numeric(
-            df["sales"],
+            df[sales_col],
             errors="coerce"
         )
 
-        quantity = pd.to_numeric(
-            df["quantity"],
+        profit = pd.to_numeric(
+            df[profit_col],
             errors="coerce"
         )
 
-        cost_price = pd.to_numeric(
-            df["cost_price"],
-            errors="coerce"
-        )
+        if unit_cost_col and quantity_col:
 
-        calculated_profit = (
-            sales
-            - (
+            quantity = pd.to_numeric(
+                df[quantity_col],
+                errors="coerce"
+            )
+
+            unit_cost = pd.to_numeric(
+                df[unit_cost_col],
+                errors="coerce"
+            )
+
+            calculated_cost = (
                 quantity
-                * cost_price
-            )
-        )
-
-        profit_missing = (
-            df["profit"].isna()
-            & sales.notna()
-            & quantity.notna()
-            & cost_price.notna()
-        )
-
-        profit_count = int(
-            profit_missing.sum()
-        )
-
-        if profit_count > 0:
-
-            df.loc[
-                profit_missing,
-                "profit"
-            ] = calculated_profit[
-                profit_missing
-            ]
-
-        report[
-            "reconstructed_values"
-        ]["profit"] = {
-            "method": (
-                "sales - "
-                "(quantity × cost_price)"
-            ),
-            "values_reconstructed":
-                profit_count
-        }
-
-        # --------------------------------------------------
-        # Validate profit
-        # --------------------------------------------------
-
-        valid_profit_mask = (
-            df["profit"].notna()
-            & sales.notna()
-            & quantity.notna()
-            & cost_price.notna()
-        )
-
-        profit_difference = (
-            pd.to_numeric(
-                df["profit"],
-                errors="coerce"
-            )
-            - calculated_profit
-        )
-
-        tolerance = 1.0
-
-        inconsistent_profit = (
-            valid_profit_mask
-            & (
-                profit_difference.abs()
-                > tolerance
-            )
-        )
-
-        profit_issue_count = int(
-            inconsistent_profit.sum()
-        )
-
-        profit_samples = []
-
-        if profit_issue_count > 0:
-
-            sample_columns = [
-                column
-                for column in [
-                    "order_id",
-                    "sales",
-                    "quantity",
-                    "cost_price",
-                    "profit"
-                ]
-                if column in df.columns
-            ]
-
-            profit_samples_df = (
-                df.loc[
-                    inconsistent_profit,
-                    sample_columns
-                ]
-                .copy()
+                * unit_cost
             )
 
-            profit_samples_df[
-                "expected_profit"
-            ] = calculated_profit[
-                inconsistent_profit
-            ]
-
-            profit_samples_df[
-                "difference"
-            ] = profit_difference[
-                inconsistent_profit
-            ]
-
-            profit_samples = (
-                profit_samples_df
-                .head(10)
-                .astype(object)
-                .where(
-                    pd.notnull(
-                        profit_samples_df.head(10)
-                    ),
-                    None
-                )
-                .to_dict(
-                    orient="records"
-                )
+            cost_method = (
+                "quantity × unit_cost"
             )
 
-        report[
-            "business_logic_issues"
-        ]["profit_consistency"] = {
-            "inconsistent_count":
-                profit_issue_count,
-            "issue": (
-                "Profit does not equal "
-                "sales - "
-                "(quantity × cost_price)"
-            ),
-            "formula": (
-                "profit = sales - "
-                "(quantity × cost_price)"
-            ),
-            "tolerance": tolerance,
-            "severity": (
-                "medium"
-                if profit_issue_count > 0
-                else "none"
-            ),
-            "sample_records":
-                profit_samples
-        }
+        elif total_cost_col:
 
-    # ==================================================
-    # 11.3 QUANTITY RECONSTRUCTION
-    # ==================================================
-
-    if has_columns(
-        "quantity",
-        "sales",
-        "unit_price"
-    ):
-
-        quantity_mask = (
-            df["quantity"].isna()
-            & df["sales"].notna()
-            & df["unit_price"].notna()
-            & (
-                pd.to_numeric(
-                    df["unit_price"],
-                    errors="coerce"
-                ) > 0
-            )
-        )
-
-        unit_price = pd.to_numeric(
-            df["unit_price"],
-            errors="coerce"
-        )
-
-        if "discount" in df.columns:
-
-            discount = pd.to_numeric(
-                df["discount"],
+            calculated_cost = pd.to_numeric(
+                df[total_cost_col],
                 errors="coerce"
             )
 
-            quantity_mask = (
-                quantity_mask
-                & discount.notna()
-            )
-
-            discounted_price = (
-                unit_price
-                * (
-                    1
-                    - discount / 100
-                )
-            )
+            cost_method = "total_cost"
 
         else:
+            calculated_cost = None
+            cost_method = None
 
-            discounted_price = unit_price
+        if calculated_cost is not None:
 
-        calculated_quantity = (
-            pd.to_numeric(
-                df["sales"],
+            calculated_profit = (
+                sales
+                - calculated_cost
+            )
+
+            profit_missing = (
+                profit.isna()
+                & sales.notna()
+                & calculated_cost.notna()
+            )
+
+            count = int(
+                profit_missing.sum()
+            )
+
+            if count > 0:
+
+                df.loc[
+                    profit_missing,
+                    profit_col
+                ] = calculated_profit[
+                    profit_missing
+                ]
+
+            report[
+                "reconstructed_values"
+            ]["profit"] = {
+                "column": profit_col,
+                "values_reconstructed": count,
+                "method": (
+                    "sales - "
+                    f"({cost_method})"
+                )
+            }
+
+            current_profit = pd.to_numeric(
+                df[profit_col],
                 errors="coerce"
             )
-            / discounted_price
-        )
 
-        valid_quantity = (
-            discounted_price.gt(0)
-            & calculated_quantity.gt(0)
-            & (
-                (
-                    calculated_quantity
-                    - calculated_quantity.round()
-                ).abs()
-                < 0.000001
-            )
-        )
-
-        reconstruct_quantity = (
-            quantity_mask
-            & valid_quantity
-        )
-
-        quantity_count = int(
-            reconstruct_quantity.sum()
-        )
-
-        if quantity_count > 0:
-
-            df.loc[
-                reconstruct_quantity,
-                "quantity"
-            ] = (
-                calculated_quantity[
-                    reconstruct_quantity
-                ].round()
+            valid = (
+                current_profit.notna()
+                & sales.notna()
+                & calculated_cost.notna()
             )
 
-        report[
-            "reconstructed_values"
-        ]["quantity"] = {
-            "method":
-                "sales / discounted_unit_price",
-            "values_reconstructed":
-                quantity_count
-        }
+            difference = (
+                current_profit
+                - calculated_profit
+            )
 
-    # ==================================================
-    # 11.4 NEGATIVE PROFIT
-    # ==================================================
+            inconsistent = (
+                valid
+                & difference.abs().gt(
+                    DEFAULT_TOLERANCE
+                )
+            )
 
-    if "profit" in df.columns:
+            issue_count = int(
+                inconsistent.sum()
+            )
 
-        profit_values = pd.to_numeric(
-            df["profit"],
+            report[
+                "business_logic_issues"
+            ]["profit_consistency"] = {
+                "inconsistent_count":
+                    issue_count,
+                "tolerance":
+                    DEFAULT_TOLERANCE,
+                "severity": (
+                    "medium"
+                    if issue_count > 0
+                    else "none"
+                )
+            }
+
+    # ========================================================
+    # GENERAL NUMERIC VALIDATION
+    # ========================================================
+
+    if quantity_col:
+
+        quantity = pd.to_numeric(
+            df[quantity_col],
             errors="coerce"
         )
 
-        negative_profit_mask = (
-            profit_values.notna()
-            & profit_values.lt(0)
+        invalid = (
+            quantity.notna()
+            & quantity.le(0)
         )
 
-        loss_count = int(
-            negative_profit_mask.sum()
-        )
-
-        report[
-            "business_logic_issues"
-        ]["negative_profit"] = {
-            "count": loss_count,
-            "issue": (
-                "Negative profit indicates "
-                "a potential business loss"
-            ),
-            "action": "flag_only",
-            "severity": (
-                "info"
-                if loss_count > 0
-                else "none"
-            )
-        }
-
-    # ==================================================
-    # 11.5 QUANTITY VALIDATION
-    # ==================================================
-
-    if "quantity" in df.columns:
-
-        quantity_values = pd.to_numeric(
-            df["quantity"],
-            errors="coerce"
-        )
-
-        invalid_quantity = (
-            quantity_values.notna()
-            & quantity_values.le(0)
-        )
-
-        quantity_issue_count = int(
-            invalid_quantity.sum()
+        count = int(
+            invalid.sum()
         )
 
         report[
             "business_logic_issues"
         ]["invalid_quantity"] = {
-            "count": quantity_issue_count,
-            "issue": (
-                "Quantity should be "
-                "greater than zero"
-            ),
+            "count": count,
+            "issue":
+                "Quantity should be greater than zero.",
             "action": "flag_only",
             "severity": (
                 "high"
-                if quantity_issue_count > 0
+                if count > 0
                 else "none"
             )
         }
 
-    # ==================================================
-    # 11.6 UNIT PRICE VALIDATION
-    # ==================================================
+    if unit_price_col:
 
-    if "unit_price" in df.columns:
-
-        unit_price_values = pd.to_numeric(
-            df["unit_price"],
+        price = pd.to_numeric(
+            df[unit_price_col],
             errors="coerce"
         )
 
-        invalid_price = (
-            unit_price_values.notna()
-            & unit_price_values.le(0)
+        invalid = (
+            price.notna()
+            & price.le(0)
         )
 
-        price_issue_count = int(
-            invalid_price.sum()
+        count = int(
+            invalid.sum()
         )
 
         report[
             "business_logic_issues"
         ]["invalid_unit_price"] = {
-            "count": price_issue_count,
-            "issue": (
-                "Unit price should "
-                "be greater than zero"
-            ),
+            "count": count,
+            "issue":
+                "Unit price should be greater than zero.",
             "action": "flag_only",
             "severity": (
                 "high"
-                if price_issue_count > 0
+                if count > 0
                 else "none"
             )
         }
 
-    # ==================================================
-    # 11.7 DISCOUNT VALIDATION
-    # ==================================================
+    # ========================================================
+    # NEGATIVE PROFIT
+    # ========================================================
 
-    if "discount" in df.columns:
+    if profit_col:
 
-        discount_values = pd.to_numeric(
-            df["discount"],
+        profit = pd.to_numeric(
+            df[profit_col],
             errors="coerce"
         )
 
-        invalid_discount = (
-            discount_values.notna()
+        negative = (
+            profit.notna()
+            & profit.lt(0)
+        )
+
+        count = int(
+            negative.sum()
+        )
+
+        report[
+            "business_logic_issues"
+        ]["negative_profit"] = {
+            "count": count,
+            "issue":
+                "Negative profit indicates a potential loss.",
+            "action": "flag_only",
+            "severity": (
+                "info"
+                if count > 0
+                else "none"
+            )
+        }
+
+    # ========================================================
+    # DISCOUNT
+    # ========================================================
+
+    discount = get_discount_percentage(
+        df,
+        columns
+    )
+
+    if discount is not None:
+
+        invalid = (
+            discount.notna()
             & (
-                discount_values.lt(0)
-                | discount_values.gt(100)
+                discount.lt(0)
+                | discount.gt(100)
             )
         )
 
-        discount_issue_count = int(
-            invalid_discount.sum()
+        count = int(
+            invalid.sum()
         )
 
         report[
             "business_logic_issues"
         ]["invalid_discount"] = {
-            "count": discount_issue_count,
-            "issue": (
-                "Discount must be "
-                "between 0 and 100"
-            ),
+            "count": count,
+            "issue":
+                "Discount must be between 0 and 100.",
             "action": "flag_only",
             "severity": (
                 "high"
-                if discount_issue_count > 0
+                if count > 0
                 else "none"
             )
         }
 
-    # ==================================================
-    # 11.8 COMPLETED / DELIVERED ORDERS
-    # ==================================================
+    # ========================================================
+    # COMPLETED / DELIVERED ORDERS
+    # ========================================================
 
-    status_column = None
+    status_col = columns["status"]
 
-    for column in [
-        "order_status",
-        "delivery_status",
-        "shipment_status"
-    ]:
-
-        if column in df.columns:
-
-            status_column = column
-            break
-
-    if status_column:
+    if status_col:
 
         status = (
-            df[status_column]
+            df[status_col]
             .astype("string")
             .str.strip()
             .str.lower()
         )
 
-        completed_mask = status.isin([
+        completed = status.isin([
             "completed",
+            "complete",
             "delivered",
-            "shipped"
+            "shipped",
+            "fulfilled"
         ])
 
         critical_columns = [
             column
             for column in [
-                "quantity",
-                "sales",
-                "profit"
+                quantity_col,
+                sales_col,
+                profit_col
             ]
-            if column in df.columns
+            if column
         ]
 
         completed_issues = {}
 
         for column in critical_columns:
 
-            missing_mask = (
-                completed_mask
-                & df[column].isna()
-            )
-
             count = int(
-                missing_mask.sum()
+                (
+                    completed
+                    & df[column].isna()
+                ).sum()
             )
 
             if count > 0:
 
                 completed_issues[column] = {
                     "missing_count": count,
-                    "issue": (
-                        f"{column} is missing "
-                        "for completed/"
-                        "delivered orders"
-                    ),
                     "action": "review",
                     "severity": "high"
                 }
@@ -1692,51 +2454,51 @@ def reconstruct_business_values(df):
                 completed_issues
             )
 
-    # ==================================================
-    # 11.9 RETURNED ORDERS
-    # ==================================================
+    # ========================================================
+    # RETURNED ORDERS
+    # ========================================================
 
-    if "return_status" in df.columns:
+    return_status_col = columns[
+        "return_status"
+    ]
+
+    if return_status_col:
 
         return_status = (
-            df["return_status"]
+            df[return_status_col]
             .astype("string")
             .str.strip()
             .str.lower()
         )
 
-        returned_mask = return_status.isin([
+        returned = return_status.isin([
             "yes",
-            "returned"
+            "returned",
+            "true",
+            "1"
         ])
 
         return_issues = {}
 
         for column in [
-            "sales",
-            "profit"
+            sales_col,
+            profit_col
         ]:
 
-            if column not in df.columns:
+            if not column:
                 continue
 
-            missing_mask = (
-                returned_mask
-                & df[column].isna()
-            )
-
             count = int(
-                missing_mask.sum()
+                (
+                    returned
+                    & df[column].isna()
+                ).sum()
             )
 
             if count > 0:
 
                 return_issues[column] = {
                     "missing_count": count,
-                    "issue": (
-                        f"{column} is missing "
-                        "for returned orders"
-                    ),
                     "action": "review",
                     "severity": "high"
                 }
@@ -1750,3 +2512,196 @@ def reconstruct_business_values(df):
             )
 
     return df, report
+
+
+# ============================================================
+# DATASET PROFILING
+# ============================================================
+
+def profile_dataset(
+    df: pd.DataFrame
+) -> Dict[str, Any]:
+    """
+    Generic dataset profiler.
+
+    Useful for AI SQL Assistant because the LLM can receive
+    this profile before generating SQL.
+    """
+
+    column_types = detect_column_types(
+        df
+    )
+
+    profile = {
+        "rows": len(df),
+        "columns": len(df.columns),
+        "column_names": list(df.columns),
+        "column_types": column_types,
+        "missing_values":
+            analyze_missing_values(df),
+        "numeric_summary":
+            validate_numeric_columns(df),
+        "date_validation":
+            validate_date_columns(df),
+        "category_inconsistencies":
+            detect_category_inconsistencies(df),
+    }
+
+    return profile
+
+
+# ============================================================
+# MASTER CLEANING FUNCTION
+# ============================================================
+
+def clean_dataset(
+    df: pd.DataFrame,
+    standardize_categories: bool = True,
+    standardize_dates: bool = True,
+    impute_missing: bool = False,
+    reconstruct_business: bool = True
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """
+    Main entry point for the ETL cleaning layer.
+
+    This function is designed for heterogeneous datasets.
+
+    IMPORTANT:
+        Missing-value imputation is OFF by default because
+        automatically filling arbitrary datasets can damage
+        business meaning.
+
+    Example:
+
+        cleaned_df, report = clean_dataset(df)
+    """
+
+    # ========================================================
+    # STEP 1 — BASIC CLEANING
+    # ========================================================
+
+    cleaned_df, basic_report = (
+        clean_basic_data(df)
+    )
+
+    # ========================================================
+    # STEP 2 — PROFILE BEFORE TRANSFORMATION
+    # ========================================================
+
+    initial_profile = profile_dataset(
+        cleaned_df
+    )
+
+    # ========================================================
+    # STEP 3 — CATEGORY STANDARDIZATION
+    # ========================================================
+
+    category_report = {}
+
+    if standardize_categories:
+
+        cleaned_df, category_report = (
+            standardize_category_values(
+                cleaned_df
+            )
+        )
+
+    # ========================================================
+    # STEP 4 — DATE STANDARDIZATION
+    # ========================================================
+
+    date_report = {}
+
+    if standardize_dates:
+
+        cleaned_df, date_report = (
+            standardize_date_columns(
+                cleaned_df
+            )
+        )
+
+    # ========================================================
+    # STEP 5 — BUSINESS RECONSTRUCTION
+    # ========================================================
+
+    reconstruction_report = {}
+
+    if reconstruct_business:
+
+        cleaned_df, reconstruction_report = (
+            reconstruct_business_values(
+                cleaned_df
+            )
+        )
+
+    # ========================================================
+    # STEP 6 — OPTIONAL IMPUTATION
+    # ========================================================
+
+    imputation_report = {}
+
+    if impute_missing:
+
+        cleaned_df, imputation_report = (
+            impute_missing_values(
+                cleaned_df
+            )
+        )
+
+    # ========================================================
+    # STEP 7 — FINAL ANALYSIS
+    # ========================================================
+
+    final_profile = profile_dataset(
+        cleaned_df
+    )
+
+    outlier_report = detect_outliers(
+        cleaned_df
+    )
+
+    business_report = validate_business_rules(
+        cleaned_df
+    )
+
+    # ========================================================
+    # FINAL REPORT
+    # ========================================================
+
+    report = {
+        "status": "success",
+
+        "basic_cleaning":
+            basic_report,
+
+        "initial_profile":
+            initial_profile,
+
+        "category_standardization":
+            category_report,
+
+        "date_standardization":
+            date_report,
+
+        "reconstruction":
+            reconstruction_report,
+
+        "imputation":
+            imputation_report,
+
+        "outliers":
+            outlier_report,
+
+        "business_rules":
+            business_report,
+
+        "final_profile":
+            final_profile,
+
+        "final_shape": {
+            "rows": len(cleaned_df),
+            "columns": len(cleaned_df.columns)
+        }
+    }
+
+    return cleaned_df, report

@@ -8,38 +8,52 @@ from app.services.sql_validator import (
 
 def execute_sql(
     engine,
-    sql: str
+    sql: str,
+    allowed_table: str = None
 ):
     """
     Safely validate and execute a read-only SQL query.
     """
 
     # ========================================================
-    # Clean AI-generated SQL
+    # CLEAN AI SQL
     # ========================================================
 
     sql = clean_generated_sql(sql)
 
     # ========================================================
-    # Validate SQL
+    # VALIDATE SQL
     # ========================================================
 
-    validation = validate_sql(sql)
+    validation = validate_sql(
+        sql,
+        allowed_table=allowed_table
+    )
 
     if not validation["valid"]:
 
         return {
-            "success": False,
-            "error": validation["message"],
-            "columns": [],
-            "rows": []
+
+            "success":
+                False,
+
+            "error":
+                validation["message"],
+
+            "columns":
+                [],
+
+            "rows":
+                [],
+
+            "row_count":
+                0
         }
 
-    # Use the cleaned SQL returned by validator
     safe_sql = validation["sql"]
 
     # ========================================================
-    # 2. Execute SQL
+    # EXECUTE
     # ========================================================
 
     try:
@@ -52,36 +66,71 @@ def execute_sql(
 
             rows = result.fetchall()
 
-            columns = result.keys()
+            columns = list(
+                result.keys()
+            )
 
             # =================================================
-            # Convert result to JSON-friendly structure
+            # JSON FRIENDLY RESULT
             # =================================================
+
+            formatted_rows = []
+
+            for row in rows:
+
+                record = {}
+
+                for index, column in enumerate(columns):
+
+                    value = row[index]
+
+                    # Convert common SQLite/Python values
+                    # into JSON-friendly values.
+
+                    if hasattr(value, "isoformat"):
+
+                        try:
+                            value = value.isoformat()
+                        except Exception:
+                            pass
+
+                    record[column] = value
+
+                formatted_rows.append(
+                    record
+                )
 
             return {
-                "success": True,
+
+                "success":
+                    True,
 
                 "columns":
-                    list(columns),
+                    columns,
 
-                "rows": [
-                    dict(zip(columns, row))
-                    for row in rows
-                ],
+                "rows":
+                    formatted_rows,
 
                 "row_count":
-                    len(rows)
+                    len(formatted_rows)
             }
 
     except Exception as error:
 
         return {
-            "success": False,
+
+            "success":
+                False,
 
             "error":
                 str(error),
 
-            "columns": [],
+            "columns":
+                [],
 
-            "rows": []
+            "rows":
+                [],
+
+            "row_count":
+                0
         }

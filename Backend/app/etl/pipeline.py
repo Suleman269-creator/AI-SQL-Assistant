@@ -5,6 +5,7 @@ from app.etl.loader import load_dataset
 from app.etl.cleaner import (
     clean_basic_data,
     detect_category_inconsistencies,
+    standardize_category_values,
     analyze_missing_values,
     validate_date_columns,
     standardize_date_columns,
@@ -20,18 +21,20 @@ def run_etl_pipeline(file_path):
     """
     Run the complete ETL pipeline.
 
-    Steps:
+    Pipeline:
         1. Load dataset
         2. Basic cleaning
-        3. Category analysis
-        4. Missing value analysis
-        5. Date validation
-        6. Date standardization
-        7. Numeric validation
-        8. Outlier detection
-        9. Business rule validation
-        10. Missing value imputation
-        11. Business value reconstruction
+        3. Category inconsistency detection
+        4. Category standardization
+        5. Missing value analysis
+        6. Date validation
+        7. Date standardization
+        8. Numeric validation
+        9. Outlier detection
+        10. Business rule validation
+        11. Missing value imputation
+        12. Business value reconstruction
+        13. Final validation
     """
 
     # ============================================================
@@ -53,25 +56,43 @@ def run_etl_pipeline(file_path):
     df, cleaning_report = clean_basic_data(df)
 
     # ============================================================
-    # 3. CATEGORY INCONSISTENCY ANALYSIS
+    # 3. CATEGORY INCONSISTENCY DETECTION
     # ============================================================
 
-    category_issues = detect_category_inconsistencies(df)
+    category_issues_before = (
+        detect_category_inconsistencies(df)
+    )
 
     # ============================================================
-    # 4. MISSING VALUE ANALYSIS
+    # 4. CATEGORY STANDARDIZATION
+    # ============================================================
+
+    df, category_standardization_report = (
+        standardize_category_values(df)
+    )
+
+    # ============================================================
+    # 5. CATEGORY INCONSISTENCY DETECTION AFTER CLEANING
+    # ============================================================
+
+    category_issues_after = (
+        detect_category_inconsistencies(df)
+    )
+
+    # ============================================================
+    # 6. MISSING VALUE ANALYSIS
     # ============================================================
 
     missing_values = analyze_missing_values(df)
 
     # ============================================================
-    # 5. DATE VALIDATION
+    # 7. DATE VALIDATION
     # ============================================================
 
     date_issues = validate_date_columns(df)
 
     # ============================================================
-    # 6. DATE STANDARDIZATION
+    # 8. DATE STANDARDIZATION
     # ============================================================
 
     df, date_standardization_report = (
@@ -79,31 +100,33 @@ def run_etl_pipeline(file_path):
     )
 
     # ============================================================
-    # 7. NUMERIC VALIDATION
+    # 9. NUMERIC VALIDATION
     # ============================================================
 
     numeric_issues = validate_numeric_columns(df)
 
     # ============================================================
-    # 8. OUTLIER DETECTION
+    # 10. OUTLIER DETECTION
     # ============================================================
 
     outlier_issues = detect_outliers(df)
 
     # ============================================================
-    # 9. BUSINESS RULE VALIDATION
+    # 11. BUSINESS RULE VALIDATION
     # ============================================================
 
     business_issues = validate_business_rules(df)
 
     # ============================================================
-    # 10. MISSING VALUE IMPUTATION
+    # 12. MISSING VALUE IMPUTATION
     # ============================================================
 
-    df, imputation_report = impute_missing_values(df)
+    df, imputation_report = (
+        impute_missing_values(df)
+    )
 
     # ============================================================
-    # 11. BUSINESS VALUE RECONSTRUCTION
+    # 13. BUSINESS VALUE RECONSTRUCTION
     # ============================================================
 
     df, reconstruction_report = (
@@ -111,40 +134,71 @@ def run_etl_pipeline(file_path):
     )
 
     # ============================================================
-    # 12. FINAL REPORT
+    # 14. FINAL REPORT
     # ============================================================
 
+    preview_df = df.head(5)
+
     report = {
-        "category_issues": category_issues,
 
-        "missing_values": missing_values,
+        "category_issues_before": (
+            category_issues_before
+        ),
 
-        "date_issues": date_issues,
+        "category_standardization": (
+            category_standardization_report
+        ),
+
+        "category_issues_after": (
+            category_issues_after
+        ),
+
+        "missing_values": (
+            missing_values
+        ),
+
+        "date_issues": (
+            date_issues
+        ),
 
         "date_standardization": (
             date_standardization_report
         ),
 
-        "numeric_issues": numeric_issues,
+        "numeric_issues": (
+            numeric_issues
+        ),
 
-        "outlier_issues": outlier_issues,
+        "outlier_issues": (
+            outlier_issues
+        ),
 
-        "business_issues": business_issues,
+        "business_issues": (
+            business_issues
+        ),
 
-        "imputation_report": imputation_report,
+        "imputation_report": (
+            imputation_report
+        ),
 
-        "reconstruction_report": reconstruction_report,
+        "reconstruction_report": (
+            reconstruction_report
+        ),
 
-        "cleaning_report": cleaning_report,
+        "cleaning_report": (
+            cleaning_report
+        ),
 
         "preview": (
-            df.head(5)
+            preview_df
             .astype(object)
             .where(
-                pd.notnull(df.head(5)),
+                pd.notnull(preview_df),
                 None
             )
-            .to_dict(orient="records")
+            .to_dict(
+                orient="records"
+            )
         )
     }
 
