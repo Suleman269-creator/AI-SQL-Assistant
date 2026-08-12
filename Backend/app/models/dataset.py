@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime
+from sqlalchemy import Column, Integer, String, DateTime, Text
 from datetime import datetime
 
 from app.database.database import Base
@@ -8,40 +8,38 @@ class DatasetMetadata(Base):
 
     __tablename__ = "dataset_metadata"
 
-    id = Column(
-        Integer,
-        primary_key=True,
+    id = Column(Integer, primary_key=True, index=True)
+
+    dataset_id = Column(
+        String,
+        unique=True,
+        nullable=False,
         index=True
     )
 
     filename = Column(
-        String(255),
+        String,
         nullable=False
     )
 
-    file_type = Column(
-        String(50),
-        nullable=True
+    table_name = Column(
+        String,
+        nullable=False
     )
 
-    rows = Column(
+    row_count = Column(
         Integer,
-        nullable=True
+        nullable=False
+    )
+
+    column_count = Column(
+        Integer,
+        nullable=False
     )
 
     columns = Column(
-        Integer,
-        nullable=True
-    )
-
-    column_names = Column(
         Text,
-        nullable=True
-    )
-
-    metadata_json = Column(
-        Text,
-        nullable=True
+        nullable=False
     )
 
     created_at = Column(
