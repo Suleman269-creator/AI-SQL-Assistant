@@ -1,20 +1,16 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import API from "./api";
 import "./App.css";
 
 // ============================================================
-// SAFE VALUE FORMATTER
+// HELPERS
 // ============================================================
 
 const formatCellValue = (value) => {
-  if (value === null || value === undefined) {
-    return "—";
-  }
+  if (value === null || value === undefined) return "—";
 
   if (typeof value === "number") {
-    if (!Number.isFinite(value)) {
-      return "—";
-    }
+    if (!Number.isFinite(value)) return "—";
 
     return Number.isInteger(value)
       ? value.toLocaleString()
@@ -25,10 +21,6 @@ const formatCellValue = (value) => {
 
   if (typeof value === "boolean") {
     return value ? "Yes" : "No";
-  }
-
-  if (value instanceof Date) {
-    return value.toLocaleDateString();
   }
 
   if (typeof value === "object") {
@@ -42,14 +34,8 @@ const formatCellValue = (value) => {
   return String(value);
 };
 
-// ============================================================
-// NORMALIZE ROW
-// ============================================================
-
 const normalizeRow = (row) => {
-  if (row === null || row === undefined) {
-    return {};
-  }
+  if (row === null || row === undefined) return {};
 
   if (
     typeof row === "object" &&
@@ -62,10 +48,6 @@ const normalizeRow = (row) => {
     value: row,
   };
 };
-
-// ============================================================
-// GET COLUMNS
-// ============================================================
 
 const getColumns = (rows) => {
   const columns = new Set();
@@ -89,45 +71,29 @@ const getColumns = (rows) => {
   return Array.from(columns);
 };
 
-// ============================================================
-// NORMALIZE AI RESULT
-// ============================================================
-
 const normalizeResult = (result) => {
-  if (
-    result === null ||
-    result === undefined
-  ) {
+  if (result === null || result === undefined) {
     return {
       columns: [],
       rows: [],
       scalar: null,
-      rowCount: 0,
     };
   }
 
-  // Scalar
   if (typeof result !== "object") {
     return {
       columns: ["value"],
-      rows: [
-        {
-          value: result,
-        },
-      ],
+      rows: [{ value: result }],
       scalar: result,
-      rowCount: 1,
     };
   }
 
-  // Array
   if (Array.isArray(result)) {
     if (result.length === 0) {
       return {
         columns: [],
         rows: [],
         scalar: null,
-        rowCount: 0,
       };
     }
 
@@ -143,11 +109,10 @@ const normalizeResult = (result) => {
         columns: getColumns(rows),
         rows,
         scalar: null,
-        rowCount: rows.length,
       };
     }
 
-    // Array of primitive values
+    // Array of scalar values
     if (!Array.isArray(result[0])) {
       const rows = result.map((value) => ({
         value,
@@ -157,7 +122,6 @@ const normalizeResult = (result) => {
         columns: ["value"],
         rows,
         scalar: null,
-        rowCount: rows.length,
       };
     }
 
@@ -179,15 +143,22 @@ const normalizeResult = (result) => {
           : [],
       rows,
       scalar: null,
-      rowCount: rows.length,
     };
   }
 
-  // Backend result
-  if (Array.isArray(result.rows)) {
+  // Backend response:
+  // {
+  //   columns: [],
+  //   rows: [],
+  //   row_count: number
+  // }
+  if (
+    typeof result === "object" &&
+    Array.isArray(result.rows)
+  ) {
     let rows = result.rows;
 
-    // Rows as arrays
+    // Convert array rows to objects
     if (
       rows.length > 0 &&
       Array.isArray(rows[0])
@@ -225,79 +196,15 @@ const normalizeResult = (result) => {
       rows,
       scalar: null,
       rowCount:
-        result.row_count ??
-        rows.length,
+        result.row_count ?? rows.length,
     };
   }
 
-  // Single object
   return {
     columns: Object.keys(result),
     rows: [result],
     scalar: null,
-    rowCount: 1,
   };
-};
-
-// ============================================================
-// DETECT PRIMARY RESULT
-// ============================================================
-
-const getPrimaryResult = (
-  columns,
-  rows
-) => {
-  if (
-    !Array.isArray(columns) ||
-    !Array.isArray(rows) ||
-    rows.length === 0
-  ) {
-    return null;
-  }
-
-  const firstRow = rows[0];
-
-  if (!firstRow) {
-    return null;
-  }
-
-  // Prefer common aggregate columns
-  const preferredColumn =
-    columns.find((column) => {
-      const normalized =
-        String(column).toLowerCase();
-
-      return (
-        normalized.includes("total") ||
-        normalized.includes("sum") ||
-        normalized.includes("count") ||
-        normalized.includes("average") ||
-        normalized.includes("avg") ||
-        normalized.includes("sales") ||
-        normalized.includes("revenue")
-      );
-    }) || columns[0];
-
-  return {
-    column: preferredColumn,
-    value:
-      firstRow[preferredColumn],
-  };
-};
-
-// ============================================================
-// FORMAT COLUMN NAME
-// ============================================================
-
-const formatColumnName = (column) => {
-  if (!column) {
-    return "";
-  }
-
-  return String(column)
-    .replace(/_/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
 };
 
 // ============================================================
@@ -311,40 +218,47 @@ function App() {
   // STATE
   // ==========================================================
 
-  const [file, setFile] =
-    useState(null);
+  const [file, setFile] = useState(null);
+  const [dataset, setDataset] = useState(null);
 
-  const [uploading, setUploading] =
+  const [question, setQuestion] = useState("");
+  const [answer, setAnswer] = useState(null);
+
+  const [uploading, setUploading] = useState(false);
+  const [asking, setAsking] = useState(false);
+
+  const [error, setError] = useState("");
+  const [dragActive, setDragActive] = useState(false);
+
+  const [theme, setTheme] = useState(
+    localStorage.getItem("queryra-theme") || "dark"
+  );
+
+  const [sidebarOpen, setSidebarOpen] =
     useState(false);
 
-  const [dataset, setDataset] =
-    useState(null);
+  const [history, setHistory] = useState([]);
 
-  const [question, setQuestion] =
-    useState("");
+  // ==========================================================
+  // THEME
+  // ==========================================================
 
-  const [asking, setAsking] =
-    useState(false);
+  useEffect(() => {
+    document.documentElement.dataset.theme =
+      theme;
 
-  const [answer, setAnswer] =
-    useState(null);
-
-  const [error, setError] =
-    useState("");
-
-  const [dragActive, setDragActive] =
-    useState(false);
+    localStorage.setItem(
+      "queryra-theme",
+      theme
+    );
+  }, [theme]);
 
   // ==========================================================
   // FILE SELECTION
   // ==========================================================
 
-  const handleFileSelect = (
-    selectedFile
-  ) => {
-    if (!selectedFile) {
-      return;
-    }
+  const handleFileSelect = (selectedFile) => {
+    if (!selectedFile) return;
 
     const allowedExtensions = [
       ".csv",
@@ -356,22 +270,22 @@ function App() {
       selectedFile.name.toLowerCase();
 
     const isValid =
-      allowedExtensions.some(
-        (extension) =>
-          fileName.endsWith(extension)
+      allowedExtensions.some((extension) =>
+        fileName.endsWith(extension)
       );
 
     if (!isValid) {
       setError(
         "Please upload a CSV or Excel file."
       );
-
       return;
     }
 
     setFile(selectedFile);
-    setError("");
+    setDataset(null);
     setAnswer(null);
+    setQuestion("");
+    setError("");
   };
 
   // ==========================================================
@@ -399,22 +313,15 @@ function App() {
   };
 
   // ==========================================================
-  // LOAD PREVIEW
+  // PREVIEW
   // ==========================================================
 
-  const loadPreview = async (
-    datasetId
-  ) => {
+  const loadPreview = async (datasetId) => {
     try {
       const response =
         await API.get(
           `/datasets/${datasetId}/preview`
         );
-
-      console.log(
-        "Dataset preview:",
-        response.data
-      );
 
       setDataset((previous) => ({
         ...previous,
@@ -425,10 +332,10 @@ function App() {
             ? response.data.preview
             : [],
       }));
-    } catch (previewError) {
+    } catch (err) {
       console.error(
         "Preview error:",
-        previewError
+        err
       );
 
       setError(
@@ -438,7 +345,7 @@ function App() {
   };
 
   // ==========================================================
-  // UPLOAD DATASET
+  // UPLOAD
   // ==========================================================
 
   const handleUpload = async () => {
@@ -446,7 +353,6 @@ function App() {
       setError(
         "Please select a CSV or Excel file first."
       );
-
       return;
     }
 
@@ -455,8 +361,7 @@ function App() {
     setAnswer(null);
 
     try {
-      const formData =
-        new FormData();
+      const formData = new FormData();
 
       formData.append(
         "file",
@@ -475,32 +380,25 @@ function App() {
           }
         );
 
-      console.log(
-        "Upload response:",
-        response.data
-      );
+      setDataset(response.data);
 
-      setDataset(
-        response.data
-      );
+      if (response.data?.dataset_id) {
+        await loadPreview(
+          response.data.dataset_id
+        );
+      }
 
-      await loadPreview(
-        response.data.dataset_id
-      );
-    } catch (uploadError) {
+      setSidebarOpen(false);
+    } catch (err) {
       console.error(
         "Upload error:",
-        uploadError
+        err
       );
 
-      const detail =
-        uploadError.response?.data
-          ?.detail;
-
       setError(
-        detail?.error ||
-          detail?.message ||
-          detail ||
+        err.response?.data?.detail?.error ||
+          err.response?.data?.detail?.message ||
+          err.response?.data?.detail ||
           "Dataset upload failed."
       );
     } finally {
@@ -509,7 +407,7 @@ function App() {
   };
 
   // ==========================================================
-  // ASK AI
+  // ASK QUERYRA AI
   // ==========================================================
 
   const handleAsk = async () => {
@@ -517,7 +415,6 @@ function App() {
       setError(
         "Please upload a dataset first."
       );
-
       return;
     }
 
@@ -525,27 +422,22 @@ function App() {
       setError(
         "Please enter a question."
       );
-
       return;
     }
 
     setAsking(true);
     setError("");
-    setAnswer(null);
 
     try {
+      const currentQuestion =
+        question.trim();
+
       const payload = {
         dataset_id:
           dataset.dataset_id,
-
         question:
-          question.trim(),
+          currentQuestion,
       };
-
-      console.log(
-        "Sending /ask request:",
-        payload
-      );
 
       const response =
         await API.post(
@@ -553,115 +445,74 @@ function App() {
           payload
         );
 
-      console.log(
-        "AI response:",
-        response.data
-      );
+      const result =
+        response.data;
 
-      setAnswer(
-        response.data
-      );
-    } catch (askError) {
+      setAnswer(result);
+
+      setHistory((previous) => [
+        {
+          id:
+            result.query_history_id ||
+            Date.now(),
+
+          question:
+            currentQuestion,
+
+          time:
+            new Date().toLocaleTimeString(
+              [],
+              {
+                hour: "2-digit",
+                minute: "2-digit",
+              }
+            ),
+        },
+        ...previous,
+      ]);
+
+      setQuestion("");
+
+      // Scroll to result
+      setTimeout(() => {
+        document
+          .getElementById(
+            "results-section"
+          )
+          ?.scrollIntoView({
+            behavior: "smooth",
+            block: "start",
+          });
+      }, 100);
+    } catch (err) {
       console.error(
-        "ASK ERROR:",
-        askError
+        "QUERYRA ASK ERROR:",
+        err
       );
 
       if (
-        askError.code ===
+        err.code ===
         "ECONNABORTED"
       ) {
         setError(
-          "The AI request timed out. Please check the backend or Gemini API."
+          "The Queryra AI request timed out. Please check your backend connection."
         );
       } else if (
-        askError.response
-      ) {
-        const status =
-          askError.response.status;
-
-        const detail =
-          askError.response.data
-            ?.detail;
-
-        console.error(
-          "Backend response:",
-          askError.response.data
-        );
-
-        // ====================================================
-        // GEMINI QUOTA ERROR
-        // ====================================================
-
-        if (
-          status === 429 ||
-          String(
-            detail?.error || ""
-          )
-            .toLowerCase()
-            .includes("quota") ||
-          String(
-            detail?.message || ""
-          )
-            .toLowerCase()
-            .includes("quota")
-        ) {
-          setError(
-            `${detail?.message || "Gemini API quota has been exceeded."} ${
-              detail?.suggestion || ""
-            }`.trim()
-          );
-        }
-
-        // ====================================================
-        // SQL ERROR
-        // ====================================================
-
-        else if (
-          status === 400
-        ) {
-          setError(
-            detail?.error ||
-              detail?.message ||
-              "The generated SQL could not be executed."
-          );
-        }
-
-        // ====================================================
-        // DATASET ERROR
-        // ====================================================
-
-        else if (
-          status === 404
-        ) {
-          setError(
-            detail?.message ||
-              detail ||
-              "Dataset was not found."
-          );
-        }
-
-        // ====================================================
-        // GENERAL BACKEND ERROR
-        // ====================================================
-
-        else {
-          setError(
-            detail?.error ||
-              detail?.message ||
-              detail ||
-              "Backend failed to process the question."
-          );
-        }
-      } else if (
-        askError.request
+        err.response
       ) {
         setError(
-          "No response received from backend. Make sure FastAPI is running."
+          err.response.data?.detail?.error ||
+            err.response.data?.detail?.message ||
+            err.response.data?.detail ||
+            "Backend failed to process the question."
+        );
+      } else if (err.request) {
+        setError(
+          "No response received from the Queryra backend."
         );
       } else {
         setError(
-          askError.message ||
+          err.message ||
             "Failed to process your question."
         );
       }
@@ -680,12 +531,34 @@ function App() {
     setAnswer(null);
     setQuestion("");
     setError("");
+    setHistory([]);
 
-    if (
-      fileInputRef.current
-    ) {
-      fileInputRef.current.value =
-        "";
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+
+    window.scrollTo({
+      top: 0,
+      behavior: "smooth",
+    });
+  };
+
+  // ==========================================================
+  // COPY SQL
+  // ==========================================================
+
+  const copySQL = async () => {
+    if (!answer?.sql) return;
+
+    try {
+      await navigator.clipboard.writeText(
+        answer.sql
+      );
+    } catch (err) {
+      console.error(
+        "Copy SQL failed:",
+        err
+      );
     }
   };
 
@@ -694,9 +567,7 @@ function App() {
   // ==========================================================
 
   const previewRows =
-    Array.isArray(
-      dataset?.preview
-    )
+    Array.isArray(dataset?.preview)
       ? dataset.preview.map(
           normalizeRow
         )
@@ -706,7 +577,7 @@ function App() {
     getColumns(previewRows);
 
   // ==========================================================
-  // AI RESULT
+  // RESULT DATA
   // ==========================================================
 
   const normalizedResult =
@@ -720,641 +591,577 @@ function App() {
   const resultColumns =
     normalizedResult.columns;
 
-  const primaryResult =
-    getPrimaryResult(
-      resultColumns,
-      resultRows
-    );
+  // ==========================================================
+  // DATASET INFO
+  // ==========================================================
+
+  const datasetInfo =
+    dataset?.dataset || {};
+
+  const datasetName =
+    datasetInfo.filename ||
+    file?.name ||
+    "No dataset";
 
   // ==========================================================
   // UI
   // ==========================================================
 
   return (
-    <div className="app">
+    <div className="app-shell">
 
       {/* ====================================================
-          HEADER
+          MOBILE OVERLAY
       ==================================================== */}
 
-      <header className="header">
+      {sidebarOpen && (
+        <div
+          className="mobile-overlay"
+          onClick={() =>
+            setSidebarOpen(false)
+          }
+        />
+      )}
 
-        <div className="brand">
+      {/* ====================================================
+          LEFT SIDEBAR
+      ==================================================== */}
 
-          <div className="brand-icon">
-            AI
+      <aside
+        className={`sidebar ${
+          sidebarOpen
+            ? "sidebar-open"
+            : ""
+        }`}
+      >
+
+        {/* BRAND */}
+
+        <div className="sidebar-brand">
+
+          <div className="brand-bot">
+            Q
           </div>
 
           <div>
-            <h1>
-              AI SQL Assistant
-            </h1>
+            <strong>
+              Queryra
+            </strong>
 
-            <p>
-              Ask questions. Get insights.
-            </p>
+            <span>
+              AI Data Intelligence
+            </span>
           </div>
 
         </div>
 
-        <div className="status-badge">
+        {/* BRAND LABEL */}
 
-          <span className="status-dot" />
+        <div
+          style={{
+            padding:
+              "0 8px 12px",
+          }}
+        >
+          <span
+            style={{
+              fontSize: "7px",
+              color:
+                "var(--muted)",
+              letterSpacing:
+                "0.12em",
+            }}
+          >
+            INTELLIGENT DATA ANALYSIS
+          </span>
+        </div>
 
-          System Ready
+        {/* NAVIGATION */}
+
+        <nav className="main-nav">
+
+          <button
+            className="nav-item active"
+            onClick={() => {
+              window.scrollTo({
+                top: 0,
+                behavior:
+                  "smooth",
+              });
+
+              setSidebarOpen(false);
+            }}
+          >
+            <span className="nav-icon">
+              ⌂
+            </span>
+
+            Dashboard
+          </button>
+
+          <button
+            className="nav-item"
+            onClick={() => {
+              document
+                .getElementById(
+                  "ask-section"
+                )
+                ?.scrollIntoView({
+                  behavior:
+                    "smooth",
+                });
+
+              setSidebarOpen(false);
+            }}
+          >
+            <span className="nav-icon">
+              ✦
+            </span>
+
+            Ask Queryra
+          </button>
+
+          <button
+            className="nav-item"
+            onClick={() => {
+              document
+                .getElementById(
+                  "results-section"
+                )
+                ?.scrollIntoView({
+                  behavior:
+                    "smooth",
+                });
+
+              setSidebarOpen(false);
+            }}
+          >
+            <span className="nav-icon">
+              ▤
+            </span>
+
+            Results
+          </button>
+
+        </nav>
+
+        {/* USER / PRODUCT CARD */}
+
+        <div className="sidebar-user">
+
+          <div className="avatar">
+            Q
+          </div>
+
+          <div className="user-info">
+
+            <strong>
+              Queryra User
+            </strong>
+
+            <span>
+              AI Data Intelligence
+            </span>
+
+          </div>
+
+          <span className="user-arrow">
+            ›
+          </span>
 
         </div>
 
-      </header>
+      </aside>
 
-      <main className="container">
+      {/* ====================================================
+          MAIN AREA
+      ==================================================== */}
 
-        {/* ==================================================
-            HERO
-        ================================================== */}
-
-        {!dataset && (
-          <section className="hero">
-
-            <span className="eyebrow">
-              AI-POWERED DATA ANALYSIS
-            </span>
-
-            <h2>
-              Talk to your data
-              <br />
-
-              <span>
-                in plain English.
-              </span>
-            </h2>
-
-            <p>
-              Upload your CSV or Excel
-              dataset and ask questions
-              using natural language.
-              Let AI generate and execute
-              SQL for you.
-            </p>
-
-          </section>
-        )}
+      <div className="main-area">
 
         {/* ==================================================
-            UPLOAD
+            TOPBAR
         ================================================== */}
 
-        {!dataset && (
-          <section className="upload-card">
+        <header className="topbar">
 
-            <div
-              className={`drop-zone ${
-                dragActive
-                  ? "drag-active"
-                  : ""
-              }`}
-              onDragOver={
-                handleDragOver
-              }
-              onDragLeave={
-                handleDragLeave
-              }
-              onDrop={
-                handleDrop
-              }
+          <button
+            className="mobile-menu"
+            onClick={() =>
+              setSidebarOpen(
+                !sidebarOpen
+              )
+            }
+            aria-label="Open menu"
+          >
+            ☰
+          </button>
+
+          <span className="mobile-title">
+            Queryra
+          </span>
+
+          <div className="topbar-actions">
+
+            {/* THEME */}
+
+            <button
+              className="theme-toggle"
               onClick={() =>
-                fileInputRef.current?.click()
+                setTheme(
+                  theme === "dark"
+                    ? "light"
+                    : "dark"
+                )
               }
+              aria-label="Toggle theme"
             >
 
-              <div className="upload-icon">
-                ↑
-              </div>
-
-              <h3>
-                Drop your dataset here
-              </h3>
-
-              <p>
-                or click to browse files
-              </p>
-
-              <span className="file-types">
-                CSV • XLSX • XLS
+              <span>
+                {theme === "dark"
+                  ? "☾"
+                  : "☀"}
               </span>
 
-              <input
-                ref={
-                  fileInputRef
-                }
-                type="file"
-                accept=".csv,.xlsx,.xls"
-                hidden
-                onChange={(event) =>
-                  handleFileSelect(
-                    event.target.files?.[0]
-                  )
-                }
-              />
+              {theme === "dark"
+                ? "Dark"
+                : "Light"}
+
+            </button>
+
+            {/* USER */}
+
+            <div className="top-user">
+
+              <div className="avatar small">
+                Q
+              </div>
+
+              <span>
+                Queryra
+              </span>
 
             </div>
 
-            {file && (
-              <div className="selected-file">
+          </div>
 
-                <div className="file-info">
+        </header>
 
-                  <div className="file-icon">
-                    {file.name
-                      .split(".")
-                      .pop()
-                      ?.toUpperCase()}
+        {/* ==================================================
+            WORKSPACE
+        ================================================== */}
+
+        <main className="workspace">
+
+          {/* =================================================
+              CENTER
+          ================================================= */}
+
+          <section className="center-panel">
+
+            {/* =================================================
+                HERO
+            ================================================= */}
+
+            <div className="assistant-header">
+
+              <div className="assistant-logo">
+                Q
+              </div>
+
+              <div>
+
+                <h1>
+                  Queryra
+                </h1>
+
+                <p>
+                  Turn your data into
+                  answers with AI-powered
+                  data intelligence.
+                </p>
+
+              </div>
+
+            </div>
+
+            {/* =================================================
+                FEATURES
+            ================================================= */}
+
+            {!dataset && (
+              <div className="feature-grid">
+
+                <div className="feature-card">
+
+                  <div className="feature-icon green">
+                    ↗
                   </div>
 
                   <div>
 
                     <strong>
-                      {file.name}
+                      Ask Naturally
                     </strong>
 
                     <span>
-                      {(
-                        file.size /
-                        1024 /
-                        1024
-                      ).toFixed(2)}{" "}
-                      MB
+                      Ask questions about
+                      your dataset in plain
+                      English.
                     </span>
 
                   </div>
 
                 </div>
 
-                <button
-                  className="primary-button"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    handleUpload();
-                  }}
-                  disabled={
-                    uploading
-                  }
-                >
-                  {uploading
-                    ? "Processing..."
-                    : "Upload Dataset →"}
-                </button>
+                <div className="feature-card">
+
+                  <div className="feature-icon yellow">
+                    ◈
+                  </div>
+
+                  <div>
+
+                    <strong>
+                      Smart SQL
+                    </strong>
+
+                    <span>
+                      Queryra converts your
+                      questions into SQL
+                      automatically.
+                    </span>
+
+                  </div>
+
+                </div>
+
+                <div className="feature-card">
+
+                  <div className="feature-icon purple">
+                    ◫
+                  </div>
+
+                  <div>
+
+                    <strong>
+                      Instant Insights
+                    </strong>
+
+                    <span>
+                      Analyze your data and
+                      receive results instantly.
+                    </span>
+
+                  </div>
+
+                </div>
 
               </div>
             )}
 
-          </section>
-        )}
-
-        {/* ==================================================
-            ERROR
-        ================================================== */}
-
-        {error && (
-          <div className="error-message">
-
-            <span>!</span>
-
-            <div>
-              {error}
-            </div>
-
-          </div>
-        )}
-
-        {/* ==================================================
-            DATASET DASHBOARD
-        ================================================== */}
-
-        {dataset && (
-          <>
-
             {/* =================================================
-                DATASET HEADER
+                UPLOAD
             ================================================= */}
 
-            <section className="dataset-header">
+            {!dataset && (
+              <section
+                className="upload-workspace"
+                onDragOver={
+                  handleDragOver
+                }
+                onDragLeave={
+                  handleDragLeave
+                }
+                onDrop={
+                  handleDrop
+                }
+                style={
+                  dragActive
+                    ? {
+                        borderColor:
+                          "var(--primary-light)",
+                        background:
+                          "rgba(245, 184, 56, 0.06)",
+                      }
+                    : {}
+                }
+              >
 
-              <div>
-
-                <span className="eyebrow">
-                  ACTIVE DATASET
-                </span>
+                <div className="upload-workspace-icon">
+                  ↑
+                </div>
 
                 <h2>
-                  {dataset.dataset
-                    ?.filename ||
-                    file?.name ||
-                    "Dataset"}
+                  Start with your data
                 </h2>
 
                 <p>
-                  Your dataset is ready
-                  for analysis.
+                  Upload a CSV or Excel
+                  dataset and let Queryra
+                  help you explore, query
+                  and understand it.
                 </p>
 
-              </div>
-
-              <button
-                className="secondary-button"
-                onClick={
-                  handleClear
-                }
-              >
-                × New Dataset
-              </button>
-
-            </section>
-
-            {/* =================================================
-                STAT CARDS
-            ================================================= */}
-
-            <section className="stats-grid">
-
-              <div className="stat-card">
-
-                <span>
-                  ROWS
-                </span>
-
-                <strong>
-                  {dataset.dataset
-                    ?.rows ??
-                    "—"}
-                </strong>
-
-              </div>
-
-              <div className="stat-card">
-
-                <span>
-                  COLUMNS
-                </span>
-
-                <strong>
-                  {dataset.dataset
-                    ?.columns ??
-                    "—"}
-                </strong>
-
-              </div>
-
-              <div className="stat-card">
-
-                <span>
-                  FILE TYPE
-                </span>
-
-                <strong>
-                  {file?.name
-                    ?.split(".")
-                    .pop()
-                    ?.toUpperCase() ||
-                    "DATA"}
-                </strong>
-
-              </div>
-
-              <div className="stat-card">
-
-                <span>
-                  STATUS
-                </span>
-
-                <strong className="success-text">
-                  ● Ready
-                </strong>
-
-              </div>
-
-            </section>
-
-            {/* =================================================
-                DATA PREVIEW
-            ================================================= */}
-
-            <section className="panel">
-
-              <div className="panel-header">
-
-                <div>
-
-                  <span className="eyebrow">
-                    DATA
-                  </span>
-
-                  <h3>
-                    Dataset Preview
-                  </h3>
-
-                </div>
-
-                <span className="preview-label">
-                  First 5 rows
-                </span>
-
-              </div>
-
-              {previewRows.length > 0 ? (
-
-                <div className="table-wrapper">
-
-                  <table className="data-table">
-
-                    <thead>
-                      <tr>
-
-                        {previewColumns.map(
-                          (column) => (
-                            <th
-                              key={column}
-                            >
-                              {formatColumnName(
-                                column
-                              )}
-                            </th>
-                          )
-                        )}
-
-                      </tr>
-                    </thead>
-
-                    <tbody>
-
-                      {previewRows.map(
-                        (
-                          row,
-                          rowIndex
-                        ) => (
-
-                          <tr
-                            key={
-                              rowIndex
-                            }
-                          >
-
-                            {previewColumns.map(
-                              (column) => (
-
-                                <td
-                                  key={
-                                    column
-                                  }
-                                >
-                                  {formatCellValue(
-                                    row[column]
-                                  )}
-                                </td>
-
-                              )
-                            )}
-
-                          </tr>
-
-                        )
-                      )}
-
-                    </tbody>
-
-                  </table>
-
-                </div>
-
-              ) : (
-
-                <div className="empty-state">
-                  No preview data available.
-                </div>
-
-              )}
-
-            </section>
-
-            {/* =================================================
-                ASK AI
-            ================================================= */}
-
-            <section className="ask-section">
-
-              <div className="ask-header">
-
-                <div>
-
-                  <span className="eyebrow">
-                    AI ANALYSIS
-                  </span>
-
-                  <h2>
-                    Ask your dataset
-                  </h2>
-
-                  <p>
-                    Ask anything about
-                    your data in natural
-                    language.
-                  </p>
-
-                </div>
-
-              </div>
-
-              <div className="question-box">
-
-                <textarea
-                  value={
-                    question
+                <button
+                  className="primary-button"
+                  onClick={() =>
+                    fileInputRef.current?.click()
                   }
-                  onChange={(event) =>
-                    setQuestion(
-                      event.target.value
+                >
+                  Choose Dataset →
+                </button>
+
+                <input
+                  ref={
+                    fileInputRef
+                  }
+                  type="file"
+                  accept=".csv,.xlsx,.xls"
+                  hidden
+                  onChange={(
+                    event
+                  ) =>
+                    handleFileSelect(
+                      event.target
+                        .files?.[0]
                     )
-                  }
-                  onKeyDown={(event) => {
-
-                    if (
-                      event.key ===
-                        "Enter" &&
-                      !event.shiftKey
-                    ) {
-                      event.preventDefault();
-
-                      handleAsk();
-                    }
-
-                  }}
-                  placeholder="e.g. What are the total sales by city?"
-                  rows="3"
-                  disabled={
-                    asking
                   }
                 />
 
-                <div className="question-footer">
-
-                  <span>
-                    {asking
-                      ? "AI is analyzing your dataset..."
-                      : "Press Enter to ask"}
-                  </span>
-
-                  <button
-                    className="primary-button"
-                    onClick={
-                      handleAsk
-                    }
-                    disabled={
-                      asking ||
-                      !question.trim()
-                    }
-                  >
-                    {asking
-                      ? "Analyzing..."
-                      : "Ask AI →"}
-                  </button>
-
-                </div>
-
-              </div>
-
-            </section>
-
-            {/* =================================================
-                AI RESULT
-            ================================================= */}
-
-            {answer && (
-              <section className="results-section">
-
-                <div className="result-heading">
-
-                  <span className="eyebrow">
-                    AI RESPONSE
-                  </span>
-
-                  <h2>
-                    Analysis Result
-                  </h2>
-
-                </div>
-
-                {/* =================================================
-                    QUESTION
-                ================================================= */}
-
-                <div className="question-result">
-
-                  <span>
-                    YOUR QUESTION
-                  </span>
-
-                  <p>
-                    {formatCellValue(
-                      answer.question
-                    )}
-                  </p>
-
-                </div>
-
-                {/* =================================================
-                    PRIMARY RESULT
-                ================================================= */}
-
-                {primaryResult && (
-                  <div className="primary-result-card">
-
-                    <span>
-                      {formatColumnName(
-                        primaryResult.column
-                      )}
-                    </span>
+                {file && (
+                  <div className="selected-file">
 
                     <strong>
-                      {formatCellValue(
-                        primaryResult.value
-                      )}
+                      {file.name}
                     </strong>
+
+                    <button
+                      className="primary-button small"
+                      onClick={
+                        handleUpload
+                      }
+                      disabled={
+                        uploading
+                      }
+                    >
+                      {uploading
+                        ? "Analyzing..."
+                        : "Upload"}
+                    </button>
 
                   </div>
                 )}
 
+              </section>
+            )}
+
+            {/* =================================================
+                ACTIVE DATASET
+            ================================================= */}
+
+            {dataset && (
+              <>
+
                 {/* =================================================
-                    SQL
+                    DATASET READY
                 ================================================= */}
 
-                {answer.sql && (
-                  <div className="result-card">
+                <div className="conversation">
 
-                    <div className="result-card-header">
+                  {question && (
+                    <div className="message user-message">
 
-                      <h3>
-                        Generated SQL
-                      </h3>
+                      <span className="message-label">
+                        YOUR QUESTION
+                      </span>
+
+                      <div className="message-bubble">
+                        {question}
+                      </div>
+
+                    </div>
+                  )}
+
+                  <div className="message">
+
+                    <div className="ai-message-header">
+
+                      <div className="mini-ai">
+                        Q
+                      </div>
 
                       <span>
-                        SQL
+                        Queryra AI
                       </span>
 
                     </div>
 
-                    <pre className="sql-code">
-                      {formatCellValue(
-                        answer.sql
-                      )}
-                    </pre>
+                    <p className="ai-intro">
+                      Your dataset is ready.
+                      Ask Queryra anything
+                      about your data.
+                    </p>
 
                   </div>
-                )}
+
+                </div>
 
                 {/* =================================================
-                    QUERY RESULT
+                    DATA PREVIEW
                 ================================================= */}
 
-                <div className="result-card">
+                <section className="results-card">
 
-                  <div className="result-card-header">
+                  <div className="results-header">
 
-                    <h3>
-                      Query Result
-                    </h3>
+                    <div>
 
-                    <span>
-                      {normalizedResult.rowCount}{" "}
-                      {normalizedResult.rowCount === 1
-                        ? "row"
-                        : "rows"}
-                    </span>
+                      <span>
+                        ACTIVE DATASET
+                      </span>
+
+                      <h2>
+                        {datasetName}
+                      </h2>
+
+                    </div>
+
+                    <button
+                      className="copy-result"
+                      onClick={
+                        handleClear
+                      }
+                    >
+                      × Change
+                    </button>
 
                   </div>
 
-                  {resultRows.length > 0 ? (
+                  {previewRows.length >
+                  0 ? (
 
-                    <div className="table-wrapper">
+                    <div className="result-table-wrapper">
 
-                      <table className="data-table">
+                      <table>
 
                         <thead>
 
                           <tr>
 
-                            {resultColumns.map(
-                              (column) => (
-
+                            {previewColumns.map(
+                              (
+                                column
+                              ) => (
                                 <th
                                   key={
                                     column
                                   }
                                 >
-                                  {formatColumnName(
+                                  {
                                     column
-                                  )}
+                                  }
                                 </th>
-
                               )
                             )}
 
@@ -1364,36 +1171,36 @@ function App() {
 
                         <tbody>
 
-                          {resultRows.map(
+                          {previewRows.map(
                             (
                               row,
-                              rowIndex
+                              index
                             ) => (
-
                               <tr
                                 key={
-                                  rowIndex
+                                  index
                                 }
                               >
 
-                                {resultColumns.map(
-                                  (column) => (
-
+                                {previewColumns.map(
+                                  (
+                                    column
+                                  ) => (
                                     <td
                                       key={
                                         column
                                       }
                                     >
                                       {formatCellValue(
-                                        row[column]
+                                        row[
+                                          column
+                                        ]
                                       )}
                                     </td>
-
                                   )
                                 )}
 
                               </tr>
-
                             )
                           )}
 
@@ -1405,76 +1212,672 @@ function App() {
 
                   ) : (
 
-                    <pre className="raw-result">
-                      {JSON.stringify(
-                        answer.result,
-                        null,
-                        2
-                      )}
-                    </pre>
+                    <div className="empty-result">
+                      No preview data available.
+                    </div>
 
                   )}
 
-                </div>
+                </section>
 
                 {/* =================================================
-                    INSIGHT
+                    ASK QUERYRA
                 ================================================= */}
 
-                {answer.insight && (
-                  <div className="result-card insight-card">
+                <section
+                  id="ask-section"
+                  className="ask-section"
+                >
 
-                    <div className="result-card-header">
+                  <div className="assistant-header">
 
-                      <h3>
-                        AI Insight
-                      </h3>
+                    <div className="assistant-logo">
+                      Q
+                    </div>
+
+                    <div>
+
+                      <h1>
+                        Ask Queryra
+                      </h1>
+
+                      <p>
+                        What would you like
+                        to discover?
+                      </p>
+
+                    </div>
+
+                  </div>
+
+                  <div className="question-input">
+
+                    <textarea
+                      value={
+                        question
+                      }
+                      onChange={(
+                        event
+                      ) =>
+                        setQuestion(
+                          event.target
+                            .value
+                        )
+                      }
+                      onKeyDown={(
+                        event
+                      ) => {
+
+                        if (
+                          event.key ===
+                            "Enter" &&
+                          !event.shiftKey
+                        ) {
+                          event.preventDefault();
+                          handleAsk();
+                        }
+
+                      }}
+                      placeholder="Ask something like: What are the total sales by city?"
+                      rows={2}
+                      disabled={
+                        asking
+                      }
+                    />
+
+                    <button
+                      className="send-button"
+                      onClick={
+                        handleAsk
+                      }
+                      disabled={
+                        asking ||
+                        !question.trim()
+                      }
+                      aria-label="Ask Queryra"
+                    >
+                      {asking
+                        ? "..."
+                        : "↑"}
+                    </button>
+
+                  </div>
+
+                </section>
+
+                {/* =================================================
+                    LOADING
+                ================================================= */}
+
+                {asking && (
+                  <div className="message">
+
+                    <div className="ai-message-header">
+
+                      <div className="mini-ai">
+                        Q
+                      </div>
 
                       <span>
-                        INSIGHT
+                        Queryra is analyzing...
                       </span>
 
                     </div>
 
-                    <p>
-                      {answer.insight}
-                    </p>
+                    <div className="typing-indicator">
+                      <span />
+                      <span />
+                      <span />
+                    </div>
 
                   </div>
                 )}
 
                 {/* =================================================
-                    QUERY HISTORY
+                    AI RESULT
                 ================================================= */}
 
-                {answer.query_history_id && (
-                  <div className="history-id">
+                {answer && (
+                  <section
+                    id="results-section"
+                    className="results-card"
+                  >
 
-                    Query ID:{" "}
+                    {/* RESULT HEADER */}
 
-                    {formatCellValue(
-                      answer.query_history_id
+                    <div className="results-header">
+
+                      <div>
+
+                        <span>
+                          QUERYRA RESPONSE
+                        </span>
+
+                        <h2>
+                          Analysis Result
+                        </h2>
+
+                      </div>
+
+                    </div>
+
+                    {/* QUESTION */}
+
+                    <div className="message">
+
+                      <span className="message-label">
+                        YOUR QUESTION
+                      </span>
+
+                      <div className="message-bubble">
+                        {formatCellValue(
+                          answer.question
+                        )}
+                      </div>
+
+                    </div>
+
+                    {/* INSIGHT */}
+
+                    <div className="insight-card">
+
+                      <div className="insight-icon">
+                        ✦
+                      </div>
+
+                      <div>
+
+                        <span>
+                          QUERYRA INSIGHT
+                        </span>
+
+                        <p>
+                          Queryra generated
+                          and executed a SQL
+                          query against your
+                          dataset successfully.
+                        </p>
+
+                      </div>
+
+                    </div>
+
+                    {/* =================================================
+                        GENERATED SQL
+                    ================================================= */}
+
+                    {answer.sql && (
+                      <div className="sql-card">
+
+                        <div className="sql-header">
+
+                          <div>
+
+                            <strong>
+                              Generated SQL
+                            </strong>
+
+                            <span>
+                              QUERY
+                            </span>
+
+                          </div>
+
+                          <button
+                            onClick={
+                              copySQL
+                            }
+                            title="Copy SQL"
+                            aria-label="Copy SQL"
+                          >
+                            ⧉
+                          </button>
+
+                        </div>
+
+                        <pre>
+                          {answer.sql}
+                        </pre>
+
+                        <div className="sql-footer">
+
+                          <span>
+                            Generated by Queryra AI
+                          </span>
+
+                          <div className="helpful">
+
+                            <span>
+                              Helpful?
+                            </span>
+
+                            <button
+                              type="button"
+                              aria-label="Helpful"
+                            >
+                              👍
+                            </button>
+
+                            <button
+                              type="button"
+                              aria-label="Not helpful"
+                            >
+                              👎
+                            </button>
+
+                          </div>
+
+                        </div>
+
+                      </div>
                     )}
 
-                  </div>
+                    {/* =================================================
+                        QUERY RESULT
+                    ================================================= */}
+
+                    <div className="results-card">
+
+                      <div className="results-header">
+
+                        <div>
+
+                          <span>
+                            QUERY RESULT
+                          </span>
+
+                          <h2>
+                            Data
+                          </h2>
+
+                        </div>
+
+                        {resultRows.length >
+                          0 && (
+                          <span>
+                            {resultRows.length}{" "}
+                            rows
+                          </span>
+                        )}
+
+                      </div>
+
+                      {resultRows.length >
+                      0 ? (
+
+                        <div className="result-table-wrapper">
+
+                          <table>
+
+                            <thead>
+
+                              <tr>
+
+                                {resultColumns.map(
+                                  (
+                                    column
+                                  ) => (
+                                    <th
+                                      key={
+                                        column
+                                      }
+                                    >
+                                      {
+                                        column
+                                      }
+                                    </th>
+                                  )
+                                )}
+
+                              </tr>
+
+                            </thead>
+
+                            <tbody>
+
+                              {resultRows.map(
+                                (
+                                  row,
+                                  rowIndex
+                                ) => (
+                                  <tr
+                                    key={
+                                      rowIndex
+                                    }
+                                  >
+
+                                    {resultColumns.map(
+                                      (
+                                        column
+                                      ) => (
+                                        <td
+                                          key={
+                                            column
+                                          }
+                                        >
+                                          {formatCellValue(
+                                            row[
+                                              column
+                                            ]
+                                          )}
+                                        </td>
+                                      )
+                                    )}
+
+                                  </tr>
+                                )
+                              )}
+
+                            </tbody>
+
+                          </table>
+
+                        </div>
+
+                      ) : (
+
+                        <pre className="empty-result">
+                          {JSON.stringify(
+                            answer.result,
+                            null,
+                            2
+                          )}
+                        </pre>
+
+                      )}
+
+                    </div>
+
+                  </section>
                 )}
 
-              </section>
+              </>
             )}
 
-          </>
+          </section>
+
+          {/* =================================================
+              RIGHT SIDEBAR
+          ================================================= */}
+
+          <aside className="right-sidebar">
+
+            {/* =================================================
+                SYSTEM STATUS
+            ================================================= */}
+
+            <div className="right-card">
+
+              <div className="right-card-title">
+
+                <span className="online-dot" />
+
+                Queryra Status
+
+              </div>
+
+              <div className="active-dataset">
+
+                <span className="dataset-dot" />
+
+                <strong>
+                  Queryra AI Online
+                </strong>
+
+              </div>
+
+            </div>
+
+            {/* =================================================
+                ACTIVE DATASET
+            ================================================= */}
+
+            <div className="right-card">
+
+              <div className="right-card-title">
+                Active Dataset
+              </div>
+
+              {dataset ? (
+
+                <>
+
+                  <div className="active-dataset">
+
+                    <span className="dataset-dot" />
+
+                    <strong>
+                      {datasetName}
+                    </strong>
+
+                  </div>
+
+                  <div className="dataset-meta">
+
+                    <span>
+                      {datasetInfo.rows ??
+                        "—"}{" "}
+                      rows
+                    </span>
+
+                    <span>
+                      •
+                    </span>
+
+                    <span>
+                      {datasetInfo.columns ??
+                        "—"}{" "}
+                      columns
+                    </span>
+
+                  </div>
+
+                  <button
+                    className="change-dataset"
+                    onClick={
+                      handleClear
+                    }
+                  >
+                    Change Dataset
+                  </button>
+
+                </>
+
+              ) : (
+
+                <div className="no-dataset">
+                  Upload a dataset to
+                  begin analysis.
+                </div>
+
+              )}
+
+            </div>
+
+            {/* =================================================
+                SCHEMA
+            ================================================= */}
+
+            {dataset && (
+              <div className="right-card">
+
+                <div className="right-card-title">
+                  Dataset Schema
+                </div>
+
+                <div className="schema-list">
+
+                  {previewColumns
+                    .slice(0, 8)
+                    .map(
+                      (
+                        column
+                      ) => {
+
+                        const sample =
+                          previewRows.find(
+                            (
+                              row
+                            ) =>
+                              row[
+                                column
+                              ] !==
+                                null &&
+                              row[
+                                column
+                              ] !==
+                                undefined
+                          )?.[
+                            column
+                          ];
+
+                        let type =
+                          "text";
+
+                        if (
+                          typeof sample ===
+                          "number"
+                        ) {
+                          type =
+                            "number";
+                        } else if (
+                          typeof sample ===
+                          "boolean"
+                        ) {
+                          type =
+                            "boolean";
+                        }
+
+                        return (
+                          <div
+                            className="schema-item"
+                            key={
+                              column
+                            }
+                          >
+
+                            <span className="schema-icon">
+                              #
+                            </span>
+
+                            <span className="schema-name">
+                              {
+                                column
+                              }
+                            </span>
+
+                            <span className="schema-type">
+                              {
+                                type
+                              }
+                            </span>
+
+                          </div>
+                        );
+                      }
+                    )}
+
+                </div>
+
+              </div>
+            )}
+
+            {/* =================================================
+                HISTORY
+            ================================================= */}
+
+            <div className="right-card">
+
+              <div className="right-card-title">
+                Recent Queries
+              </div>
+
+              {history.length >
+              0 ? (
+
+                <div className="history-list">
+
+                  {history
+                    .slice(0, 5)
+                    .map(
+                      (
+                        item
+                      ) => (
+
+                        <button
+                          className="history-item"
+                          key={
+                            item.id
+                          }
+                          onClick={() =>
+                            setQuestion(
+                              item.question
+                            )
+                          }
+                        >
+
+                          <span className="history-question">
+                            {
+                              item.question
+                            }
+                          </span>
+
+                          <span className="history-time">
+                            {
+                              item.time
+                            }
+                          </span>
+
+                        </button>
+
+                      )
+                    )}
+
+                </div>
+
+              ) : (
+
+                <div className="no-dataset">
+                  Your recent questions
+                  will appear here.
+                </div>
+
+              )}
+
+            </div>
+
+          </aside>
+
+        </main>
+
+        {/* ==================================================
+            ERROR
+        ================================================== */}
+
+        {error && (
+          <div
+            className="error-message"
+            style={{
+              position:
+                "fixed",
+              bottom: "20px",
+              right: "20px",
+              zIndex: 200,
+              maxWidth:
+                "420px",
+            }}
+          >
+
+            <span>
+              !
+            </span>
+
+            {error}
+
+          </div>
         )}
 
-      </main>
-
-      {/* ======================================================
-          FOOTER
-      ====================================================== */}
-
-      <footer className="footer">
-        AI SQL Assistant • Intelligent
-        Data Analysis
-      </footer>
+      </div>
 
     </div>
   );
